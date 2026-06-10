@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type Konva from 'konva';
-import { Circle, Layer, Line, Rect, Stage, Text } from 'react-konva';
+import { Circle, Layer, Line, Rect, Stage, Text, Transformer } from 'react-konva';
 import type { BoardObject, BoardObjectId, RoomId } from '@whiteboard/shared';
 import {
   createLocalRectangleObject,
@@ -11,7 +11,15 @@ import {
 } from './boardStore';
 
 type BoardCanvasProps = {
+  canDrawRectangle: boolean;
+  canEditObjects: boolean;
   currentUserId: string;
+  onObjectMoveCommit: (objectId: BoardObjectId, position: { x: number; y: number }) => void;
+  onRectangleResizeCommit: (
+    objectId: BoardObjectId,
+    rectangle: { height: number; width: number; x: number; y: number }
+  ) => void;
+  onRectangleCommit: (rectangle: BoardObject) => void;
   roomId: RoomId;
 };
 
@@ -37,15 +45,25 @@ type RectangleDraft = {
   start: BoardPoint;
 };
 
-export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
+export function BoardCanvas({
+  canDrawRectangle,
+  canEditObjects,
+  currentUserId,
+  onObjectMoveCommit,
+  onRectangleCommit,
+  onRectangleResizeCommit,
+  roomId
+}: BoardCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const shapeRefs = useRef<Record<BoardObjectId, Konva.Node | null>>({});
+  const transformerRef = useRef<Konva.Transformer | null>(null);
   const [canvasSize, setCanvasSize] = useState(defaultCanvasSize);
   const [rectangleDraft, setRectangleDraft] = useState<RectangleDraft | null>(null);
   const objectsById = useBoardStore((state) => state.objects);
+  const boardVersion = useBoardStore((state) => state.boardVersion);
   const selectedObjectId = useBoardStore((state) => state.selectedObjectId);
   const tool = useBoardStore((state) => state.tool);
   const viewport = useBoardStore((state) => state.viewport);
-  const addObject = useBoardStore((state) => state.addObject);
   const clearSelection = useBoardStore((state) => state.clearSelection);
   const initializeRoom = useBoardStore((state) => state.initializeRoom);
   const resetViewport = useBoardStore((state) => state.resetViewport);
@@ -64,10 +82,37 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
     () => objects.find((object) => object.id === selectedObjectId) ?? null,
     [objects, selectedObjectId]
   );
+  const selectedRectangle = selectedObject?.type === 'rectangle' ? selectedObject : null;
 
   useEffect(() => {
     initializeRoom(roomId);
   }, [initializeRoom, roomId]);
+
+  useEffect(() => {
+    const transformer = transformerRef.current;
+
+    if (!transformer || !selectedRectangle || !canEditObjects) {
+      transformer?.nodes([]);
+      return;
+    }
+
+    const selectedNode = shapeRefs.current[selectedRectangle.id];
+
+    if (!selectedNode) {
+      transformer.nodes([]);
+      return;
+    }
+
+    transformer.nodes([selectedNode]);
+    transformer.getLayer()?.batchDraw();
+  }, [canEditObjects, selectedRectangle]);
+
+  useEffect(() => {
+    if (!canDrawRectangle && tool === 'rectangle') {
+      setRectangleDraft(null);
+      setTool('select');
+    }
+  }, [canDrawRectangle, setTool, tool]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -117,15 +162,22 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
   };
 
   const handleStageDragEnd = (event: Konva.KonvaEventObject<DragEvent>) => {
-    setViewport({
-      ...viewport,
-      x: event.target.x(),
-      y: event.target.y()
-    });
+    const nextViewport = getViewportAfterStageDragEnd(
+      viewport,
+      event.target === event.target.getStage(),
+      {
+        x: event.target.x(),
+        y: event.target.y()
+      }
+    );
+
+    if (nextViewport !== viewport) {
+      setViewport(nextViewport);
+    }
   };
 
   const handleStageMouseDown = (event: Konva.KonvaEventObject<MouseEvent>) => {
-    if (tool !== 'rectangle' || event.evt.button !== 0) {
+    if (!canDrawRectangle || tool !== 'rectangle' || event.evt.button !== 0) {
       return;
     }
 
@@ -142,8 +194,47 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
     });
   };
 
+  const handleObjectDragEnd = (
+    objectId: BoardObjectId,
+    event: Konva.KonvaEventObject<DragEvent>
+  ) => {
+    if (!canEditObjects) {
+      return;
+    }
+
+    onObjectMoveCommit(objectId, {
+      x: event.target.x(),
+      y: event.target.y()
+    });
+  };
+
+  const handleRectangleTransformEnd = (
+    objectId: BoardObjectId,
+    event: Konva.KonvaEventObject<Event>
+  ) => {
+    if (!canEditObjects) {
+      return;
+    }
+
+    const node = event.target;
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const width = Math.max(4, node.width() * scaleX);
+    const height = Math.max(4, node.height() * scaleY);
+
+    node.scaleX(1);
+    node.scaleY(1);
+
+    onRectangleResizeCommit(objectId, {
+      x: node.x(),
+      y: node.y(),
+      width,
+      height
+    });
+  };
+
   const handleStageMouseMove = (event: Konva.KonvaEventObject<MouseEvent>) => {
-    if (tool !== 'rectangle' || !rectangleDraft) {
+    if (!canDrawRectangle || tool !== 'rectangle' || !rectangleDraft) {
       return;
     }
 
@@ -160,7 +251,7 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
   };
 
   const handleStageMouseUp = (event: Konva.KonvaEventObject<MouseEvent>) => {
-    if (tool !== 'rectangle' || !rectangleDraft) {
+    if (!canDrawRectangle || tool !== 'rectangle' || !rectangleDraft) {
       return;
     }
 
@@ -175,7 +266,7 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
     setRectangleDraft(null);
 
     if (rectangle) {
-      addObject(rectangle);
+      onRectangleCommit(rectangle);
     }
   };
 
@@ -192,6 +283,7 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
           </button>
           <button
             className={tool === 'rectangle' ? 'tool-button active-tool' : 'tool-button'}
+            disabled={!canDrawRectangle}
             type="button"
             onClick={() => setTool('rectangle')}
           >
@@ -206,6 +298,7 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
           </button>
         </div>
         <div className="toolbar-group" aria-label="Canvas view">
+          <span className="zoom-label">v{boardVersion}</span>
           <span className="zoom-label">{Math.round(viewport.scale * 100)}%</span>
           <button className="tool-button" type="button" onClick={resetViewport}>
             Reset View
@@ -240,7 +333,13 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
             {objects.map((object) => (
               <BoardObjectShape
                 key={object.id}
+                canEdit={canEditObjects && tool === 'select'}
                 object={object}
+                onDragEnd={handleObjectDragEnd}
+                onRectangleTransformEnd={handleRectangleTransformEnd}
+                onRegisterNode={(node) => {
+                  shapeRefs.current[object.id] = node;
+                }}
                 selected={object.id === selectedObjectId}
                 onSelect={selectObject}
               />
@@ -262,6 +361,22 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
               />
             )}
           </Layer>
+          <Layer listening={canEditObjects && tool === 'select'}>
+            {selectedRectangle && (
+              <Transformer
+                ref={transformerRef}
+                rotateEnabled={false}
+                enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+                boundBoxFunc={(_oldBox, newBox) => {
+                  if (newBox.width < 4 || newBox.height < 4) {
+                    return _oldBox;
+                  }
+
+                  return newBox;
+                }}
+              />
+            )}
+          </Layer>
         </Stage>
       </div>
     </section>
@@ -269,20 +384,33 @@ export function BoardCanvas({ currentUserId, roomId }: BoardCanvasProps) {
 }
 
 function BoardObjectShape({
+  canEdit,
   object,
+  onDragEnd,
+  onRectangleTransformEnd,
+  onRegisterNode,
   onSelect,
   selected
 }: {
+  canEdit: boolean;
   object: BoardObject;
+  onDragEnd: (objectId: BoardObjectId, event: Konva.KonvaEventObject<DragEvent>) => void;
+  onRectangleTransformEnd: (
+    objectId: BoardObjectId,
+    event: Konva.KonvaEventObject<Event>
+  ) => void;
+  onRegisterNode: (node: Konva.Node | null) => void;
   onSelect: (objectId: BoardObjectId) => void;
   selected: boolean;
 }) {
   const commonProps = {
+    draggable: canEdit,
     rotation: object.rotation ?? 0,
     shadowBlur: selected ? 8 : 0,
     shadowColor: '#1f6feb',
     x: object.x,
     y: object.y,
+    onDragEnd: (event: Konva.KonvaEventObject<DragEvent>) => onDragEnd(object.id, event),
     onClick: () => onSelect(object.id),
     onTap: () => onSelect(object.id)
   };
@@ -291,11 +419,13 @@ function BoardObjectShape({
     return (
       <Rect
         {...commonProps}
+        ref={onRegisterNode}
         width={getNumberProp(object, 'width', 140)}
         height={getNumberProp(object, 'height', 90)}
         fill={getStringProp(object, 'fill', '#dbeafe')}
         stroke={getStringProp(object, 'stroke', '#1f6feb')}
         strokeWidth={getNumberProp(object, 'strokeWidth', 2)}
+        onTransformEnd={(event) => onRectangleTransformEnd(object.id, event)}
       />
     );
   }
@@ -304,6 +434,7 @@ function BoardObjectShape({
     return (
       <Circle
         {...commonProps}
+        ref={onRegisterNode}
         radius={getNumberProp(object, 'radius', 48)}
         fill={getStringProp(object, 'fill', '#ecfccb')}
         stroke={getStringProp(object, 'stroke', '#4d7c0f')}
@@ -316,6 +447,7 @@ function BoardObjectShape({
     return (
       <Line
         {...commonProps}
+        ref={onRegisterNode}
         points={getNumberArrayProp(object, 'points', [0, 0, 120, 36])}
         stroke={getStringProp(object, 'stroke', '#0f766e')}
         strokeWidth={getNumberProp(object, 'strokeWidth', 4)}
@@ -328,6 +460,7 @@ function BoardObjectShape({
   return (
     <Text
       {...commonProps}
+      ref={onRegisterNode}
       text={getStringProp(object, 'text', 'Text')}
       width={getNumberProp(object, 'width', 220)}
       fill={getStringProp(object, 'fill', '#172026')}
@@ -440,6 +573,22 @@ function getNumberArrayProp(object: BoardObject, key: string, fallback: number[]
 
 function clampScale(scale: number): number {
   return Math.min(2.5, Math.max(0.35, scale));
+}
+
+export function getViewportAfterStageDragEnd(
+  viewport: { scale: number; x: number; y: number },
+  isStageTarget: boolean,
+  position: { x: number; y: number }
+) {
+  if (!isStageTarget) {
+    return viewport;
+  }
+
+  return {
+    ...viewport,
+    x: position.x,
+    y: position.y
+  };
 }
 
 function getBoardPoint(

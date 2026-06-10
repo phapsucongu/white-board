@@ -9,6 +9,7 @@ import {
 import {
   ConnectedSocket,
   MessageBody,
+  OnGatewayInit,
   OnGatewayConnection,
   OnGatewayDisconnect,
   SubscribeMessage,
@@ -82,12 +83,29 @@ type SocketErrorPayload = {
   message: string;
 };
 
+const defaultSocketCorsOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+
+function getSocketCorsOrigins(): string[] | boolean {
+  const configuredOrigin = process.env.CORS_ORIGIN;
+
+  if (!configuredOrigin) {
+    return defaultSocketCorsOrigins;
+  }
+
+  const origins = configuredOrigin
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return origins.length > 0 ? origins : true;
+}
+
 @WebSocketGateway({
   cors: {
-    origin: process.env.CORS_ORIGIN ?? true
+    origin: getSocketCorsOrigins()
   }
 })
-export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   private readonly server!: Server;
 
@@ -100,29 +118,51 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly usersService: UsersService
   ) {}
 
-  async handleConnection(client: AuthenticatedSocket): Promise<void> {
-    const token = this.extractToken(client);
+  afterInit(server: Server): void {
+    server.use(async (client, next) => {
+      try {
+        const user = await this.authenticateSocket(client as AuthenticatedSocket);
+        (client as AuthenticatedSocket).data.user = user;
+        next();
+      } catch {
+        next(new Error('Authentication required'));
+      }
+    });
+  }
 
-    if (!token) {
-      this.rejectConnection(client);
+  async handleConnection(client: AuthenticatedSocket): Promise<void> {
+    if (client.data.user) {
       return;
     }
 
-    try {
-      const payload = await this.jwt.verifyAsync<AccessTokenPayload>(token, {
-        secret: this.getAccessSecret()
-      });
-      const user = await this.usersService.findPublicById(payload.sub);
-
-      if (!user) {
+    // Unit tests call lifecycle handlers directly, so keep this fallback outside Socket.IO middleware.
+    // Real clients are authenticated in afterInit before receiving the connect event.
+    await this.authenticateSocket(client)
+      .then((user) => {
+        client.data.user = user;
+      })
+      .catch(() => {
         this.rejectConnection(client);
-        return;
-      }
+      });
+  }
 
-      client.data.user = user;
-    } catch {
-      this.rejectConnection(client);
+  private async authenticateSocket(client: AuthenticatedSocket): Promise<PublicUser> {
+    const token = this.extractToken(client);
+
+    if (!token) {
+      throw new Error('Authentication required');
     }
+
+    const payload = await this.jwt.verifyAsync<AccessTokenPayload>(token, {
+      secret: this.getAccessSecret()
+    });
+    const user = await this.usersService.findPublicById(payload.sub);
+
+    if (!user) {
+      throw new Error('Authentication required');
+    }
+
+    return user;
   }
 
   handleDisconnect(client: AuthenticatedSocket): void {

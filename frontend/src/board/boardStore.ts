@@ -21,6 +21,51 @@ export type RectangleGeometry = {
   height: number;
 };
 
+export type BoardSnapshot = {
+  objects: Record<BoardObjectId, BoardObject>;
+};
+
+export type CreateBoardObjectPayload = {
+  object: {
+    id: BoardObjectId;
+    type: BoardObject['type'];
+    x: number;
+    y: number;
+    rotation?: number;
+    props?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  };
+};
+
+export type UpdateBoardObjectPayload = {
+  objectId: BoardObjectId;
+  patch: {
+    x?: number;
+    y?: number;
+    rotation?: number;
+    props?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  };
+};
+
+export type BoardCreateAcceptedEvent = {
+  actorId: string;
+  eventType: 'object:create';
+  payload: CreateBoardObjectPayload;
+  roomId: RoomId;
+  serverTime: string;
+  version: number;
+};
+
+export type BoardUpdateAcceptedEvent = {
+  actorId: string;
+  eventType: 'object:update';
+  payload: UpdateBoardObjectPayload;
+  roomId: RoomId;
+  serverTime: string;
+  version: number;
+};
+
 type CreateLocalRectangleInput = {
   createdBy: string;
   end: BoardPoint;
@@ -31,16 +76,21 @@ type CreateLocalRectangleInput = {
 };
 
 type BoardStore = {
+  boardVersion: number;
   objects: Record<BoardObjectId, BoardObject>;
   roomId: RoomId | null;
   selectedObjectId: BoardObjectId | null;
   tool: CanvasTool;
   viewport: BoardViewport;
   addObject: (object: BoardObject) => void;
+  applyAcceptedCreateEvent: (event: BoardCreateAcceptedEvent) => void;
+  applyAcceptedUpdateEvent: (event: BoardUpdateAcceptedEvent) => void;
   clearSelection: () => void;
   initializeRoom: (roomId: RoomId) => void;
   resetViewport: () => void;
   selectObject: (objectId: BoardObjectId) => void;
+  setBoardSnapshot: (roomId: RoomId, snapshot: BoardSnapshot, version: number) => void;
+  setBoardVersion: (version: number) => void;
   setTool: (tool: CanvasTool) => void;
   setViewport: (viewport: BoardViewport) => void;
 };
@@ -54,6 +104,7 @@ const initialViewport: BoardViewport = {
 const minimumRectangleSize = 4;
 
 export const useBoardStore = create<BoardStore>((set, get) => ({
+  boardVersion: 0,
   objects: {},
   roomId: null,
   selectedObjectId: null,
@@ -67,6 +118,49 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
       },
       selectedObjectId: object.id
     })),
+  applyAcceptedCreateEvent: (event) =>
+    set((state) => {
+      if (event.version <= state.boardVersion && state.objects[event.payload.object.id]) {
+        return {
+          boardVersion: Math.max(state.boardVersion, event.version)
+        };
+      }
+
+      const object = createBoardObjectFromAcceptedCreate(event);
+
+      return {
+        boardVersion: Math.max(state.boardVersion, event.version),
+        objects: {
+          ...state.objects,
+          [object.id]: object
+        },
+        selectedObjectId: state.selectedObjectId === object.id ? object.id : state.selectedObjectId
+      };
+    }),
+  applyAcceptedUpdateEvent: (event) =>
+    set((state) => {
+      if (event.version <= state.boardVersion) {
+        return {
+          boardVersion: Math.max(state.boardVersion, event.version)
+        };
+      }
+
+      const existing = state.objects[event.payload.objectId];
+
+      if (!existing || existing.deleted) {
+        return {
+          boardVersion: Math.max(state.boardVersion, event.version)
+        };
+      }
+
+      return {
+        boardVersion: event.version,
+        objects: {
+          ...state.objects,
+          [existing.id]: applyObjectPatch(existing, event)
+        }
+      };
+    }),
   clearSelection: () => set({ selectedObjectId: null }),
   initializeRoom: (roomId) => {
     if (get().roomId === roomId) {
@@ -74,7 +168,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     }
 
     set({
-      objects: createInitialObjects(roomId),
+      objects: {},
+      boardVersion: 0,
       roomId,
       selectedObjectId: null,
       tool: 'select',
@@ -83,6 +178,17 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   },
   resetViewport: () => set({ viewport: initialViewport }),
   selectObject: (objectId) => set({ selectedObjectId: objectId, tool: 'select' }),
+  setBoardSnapshot: (roomId, snapshot, version) =>
+    set({
+      boardVersion: version,
+      objects: snapshot.objects,
+      roomId,
+      selectedObjectId: null
+    }),
+  setBoardVersion: (version) =>
+    set((state) => ({
+      boardVersion: Math.max(state.boardVersion, version)
+    })),
   setTool: (tool) => set({ tool }),
   setViewport: (viewport) => set({ viewport })
 }));
@@ -138,95 +244,47 @@ export function createLocalRectangleObject({
   };
 }
 
+function createBoardObjectFromAcceptedCreate(event: BoardCreateAcceptedEvent): BoardObject {
+  const { object } = event.payload;
+
+  return {
+    id: object.id,
+    roomId: event.roomId,
+    type: object.type,
+    x: object.x,
+    y: object.y,
+    rotation: object.rotation ?? 0,
+    version: 1,
+    createdBy: event.actorId,
+    updatedBy: event.actorId,
+    createdAt: event.serverTime,
+    updatedAt: event.serverTime,
+    deleted: false,
+    props: object.props ?? {},
+    metadata: object.metadata
+  };
+}
+
+function applyObjectPatch(object: BoardObject, event: BoardUpdateAcceptedEvent): BoardObject {
+  const patch = event.payload.patch;
+
+  return {
+    ...object,
+    x: patch.x ?? object.x,
+    y: patch.y ?? object.y,
+    rotation: patch.rotation ?? object.rotation,
+    props: patch.props ? { ...object.props, ...patch.props } : object.props,
+    metadata: patch.metadata ? { ...(object.metadata ?? {}), ...patch.metadata } : object.metadata,
+    version: object.version + 1,
+    updatedBy: event.actorId,
+    updatedAt: event.serverTime
+  };
+}
+
 function createBoardObjectId(): BoardObjectId {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
 
   return `local-rectangle-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function createInitialObjects(roomId: RoomId): Record<BoardObjectId, BoardObject> {
-  const now = new Date().toISOString();
-  const userId = 'local-user';
-  const objects: BoardObject[] = [
-    {
-      id: 'local-rectangle-1',
-      roomId,
-      type: 'rectangle',
-      x: 96,
-      y: 96,
-      rotation: 0,
-      version: 0,
-      createdBy: userId,
-      updatedBy: userId,
-      createdAt: now,
-      updatedAt: now,
-      props: {
-        fill: '#dbeafe',
-        height: 96,
-        stroke: '#1f6feb',
-        strokeWidth: 2,
-        width: 164
-      }
-    },
-    {
-      id: 'local-circle-1',
-      roomId,
-      type: 'circle',
-      x: 360,
-      y: 144,
-      rotation: 0,
-      version: 0,
-      createdBy: userId,
-      updatedBy: userId,
-      createdAt: now,
-      updatedAt: now,
-      props: {
-        fill: '#ecfccb',
-        radius: 52,
-        stroke: '#4d7c0f',
-        strokeWidth: 2
-      }
-    },
-    {
-      id: 'local-line-1',
-      roomId,
-      type: 'line',
-      x: 126,
-      y: 286,
-      rotation: 0,
-      version: 0,
-      createdBy: userId,
-      updatedBy: userId,
-      createdAt: now,
-      updatedAt: now,
-      props: {
-        points: [0, 0, 98, 42, 202, 8],
-        stroke: '#0f766e',
-        strokeWidth: 4
-      }
-    },
-    {
-      id: 'local-text-1',
-      roomId,
-      type: 'text',
-      x: 352,
-      y: 292,
-      rotation: 0,
-      version: 0,
-      createdBy: userId,
-      updatedBy: userId,
-      createdAt: now,
-      updatedAt: now,
-      props: {
-        fill: '#172026',
-        fontSize: 22,
-        text: 'Local canvas shell',
-        width: 240
-      }
-    }
-  ];
-
-  return Object.fromEntries(objects.map((object) => [object.id, object]));
 }

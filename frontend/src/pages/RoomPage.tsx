@@ -3,6 +3,12 @@ import { Link, useParams } from 'react-router-dom';
 import { apiClient, type RoomSummary } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { BoardCanvas } from '../board/BoardCanvas';
+import {
+  canMutateRoom,
+  toMoveBoardObjectPayload,
+  toResizeRectanglePayload,
+  useRoomRealtime
+} from '../realtime/useRoomRealtime';
 
 type RoomState =
   | { status: 'loading' }
@@ -11,8 +17,15 @@ type RoomState =
 
 export function RoomPage() {
   const { roomId } = useParams();
-  const { runWithAuth, user } = useAuth();
+  const { accessToken, runWithAuth, user } = useAuth();
   const [roomState, setRoomState] = useState<RoomState>({ status: 'loading' });
+  const activeRoom = roomState.status === 'ready' ? roomState.room : null;
+  const canDrawRectangle = canMutateRoom(activeRoom?.role);
+  const realtime = useRoomRealtime({
+    accessToken,
+    enabled: Boolean(activeRoom),
+    roomId: activeRoom?.id ?? null
+  });
 
   useEffect(() => {
     let isActive = true;
@@ -58,12 +71,30 @@ export function RoomPage() {
         {roomState.status === 'error' && (
           <p className="status status-error">{roomState.message}</p>
         )}
+        {roomState.status === 'ready' && (
+          <p className={realtime.error ? 'status status-error' : 'muted'}>
+            Realtime: {realtime.status}
+            {realtime.error ? ` (${realtime.error})` : ''}
+          </p>
+        )}
         <Link className="button-link" to="/dashboard">
           Back to Dashboard
         </Link>
       </section>
       {roomState.status === 'ready' && (
-        <BoardCanvas currentUserId={user?.id ?? 'local-user'} roomId={roomState.room.id} />
+        <BoardCanvas
+          canDrawRectangle={canDrawRectangle}
+          canEditObjects={canDrawRectangle}
+          currentUserId={user?.id ?? 'local-user'}
+          onObjectMoveCommit={(objectId, position) => {
+            realtime.sendObjectUpdate(toMoveBoardObjectPayload(objectId, position));
+          }}
+          onRectangleCommit={realtime.sendRectangleCreate}
+          onRectangleResizeCommit={(objectId, rectangle) => {
+            realtime.sendObjectUpdate(toResizeRectanglePayload(objectId, rectangle));
+          }}
+          roomId={roomState.room.id}
+        />
       )}
     </section>
   );
