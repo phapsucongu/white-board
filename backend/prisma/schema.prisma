@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedRooms      Room[]           @relation("RoomOwner")
+  memberships     RoomMember[]
+  boardEvents     BoardEvent[]
+  refreshSessions RefreshSession[]
+}
+
+model RefreshSession {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Room {
+  id        String   @id @default(uuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner       User         @relation("RoomOwner", fields: [ownerId], references: [id])
+  members     RoomMember[]
+  boardState  BoardState?
+  boardEvents BoardEvent[]
+  versionTags VersionTag[]
+
+  @@index([ownerId])
+}
+
+model RoomMember {
+  id        String   @id @default(uuid())
+  roomId    String
+  userId    String
+  role      RoomRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model BoardState {
+  id           String   @id @default(uuid())
+  roomId       String   @unique
+  version      Int      @default(0)
+  snapshotJson Json
+  updatedAt    DateTime @updatedAt
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@index([version])
+}
+
+model BoardEvent {
+  id          String   @id @default(uuid())
+  roomId      String
+  version     Int
+  eventType   String
+  payloadJson Json
+  actorId     String
+  createdAt   DateTime @default(now())
+
+  room  Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actor User @relation(fields: [actorId], references: [id])
+
+  @@unique([roomId, version])
+  @@index([roomId])
+  @@index([version])
+  @@index([actorId])
+}
+
+model VersionTag {
+  id        String   @id @default(uuid())
+  roomId    String
+  version   Int
+  label     String
+  createdAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, version, label])
+  @@index([roomId])
+  @@index([version])
+}

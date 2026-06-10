@@ -1,0 +1,67 @@
+---
+description: Rules for Realtime Collaborative Tactical Whiteboard
+alwaysApply: true
+---
+
+# Realtime Whiteboard Cursor Rules
+
+You are coding inside the Realtime Collaborative Tactical Whiteboard project.
+
+## Stack
+
+- React + Vite + TypeScript
+- React-Konva / Konva
+- Zustand
+- TanStack Query
+- NestJS + TypeScript
+- Socket.IO
+- PostgreSQL + Prisma
+- JWT auth with refresh token rotation
+
+## Main rule
+
+Do not invent architecture. Follow existing docs in this order:
+
+1. `docs/agent/00_PROJECT_CONTEXT.md`
+2. `docs/agent/01_SYSTEM_PROMPT.md`
+3. `docs/agent/AGENT_WORKFLOW.md`
+4. Task-specific docs in `docs/agent/`
+
+## Realtime rules
+
+Persistent board changes must be server-authoritative.
+
+Do not broadcast a persistent operation until:
+
+1. Socket is authenticated.
+2. User membership is loaded.
+3. Role permission is checked.
+4. Payload is validated.
+5. Version/conflict rule is applied.
+6. Event is saved or state is persisted.
+
+Ephemeral events such as cursor/selection can be throttled and do not need database persistence.
+
+## Canvas rules
+
+- Use stable object IDs.
+- Separate canvas rendering from networking.
+- Do not mutate React state directly.
+- Avoid re-rendering the entire stage for every cursor event.
+- Keep transient pointer/drag state local where possible.
+
+## Database rules
+
+- Use Prisma migrations.
+- Do not manually edit generated Prisma client.
+- Include room membership/role checks for room-scoped records.
+- Use event log + snapshot strategy for board history.
+
+## Output expectation
+
+When implementing a task:
+
+- Make minimal focused changes.
+- Add or update tests when practical.
+- Update docs if API/events/schema changed.
+- End with commands to verify.
