@@ -1,4 +1,4 @@
-import type { ServiceHealth } from '@whiteboard/shared';
+import type { BoardObject, BoardObjectId, ServiceHealth } from '@whiteboard/shared';
 import { env } from '../config/env';
 
 export type AuthUser = {
@@ -32,6 +32,7 @@ export type RoomSummary = {
   id: string;
   name: string;
   ownerId: string;
+  inviteCode?: string;
   createdAt: string;
   updatedAt: string;
   role?: RoomRole;
@@ -39,6 +40,43 @@ export type RoomSummary = {
 
 export type CreateRoomInput = {
   name: string;
+};
+
+export type BoardSnapshotResponse = {
+  roomId: string;
+  version: number;
+  objects: Record<BoardObjectId, BoardObject>;
+  updatedAt: string | null;
+};
+
+export type BoardVersionEvent = {
+  id: string;
+  roomId: string;
+  version: number;
+  eventType: string;
+  payload: unknown;
+  actorId: string;
+  createdAt: string;
+};
+
+export type VersionTag = {
+  id: string;
+  roomId: string;
+  version: number;
+  label: string;
+  createdAt: string;
+};
+
+export type VersionHistory = {
+  roomId: string;
+  currentVersion: number;
+  events: BoardVersionEvent[];
+  tags: VersionTag[];
+};
+
+export type CreateVersionTagInput = {
+  version: number;
+  label: string;
 };
 
 type RequestOptions = {
@@ -140,6 +178,36 @@ export const apiClient = {
     }),
   getRoom: (roomId: string, accessToken: string) =>
     apiRequest<RoomSummary>(`/rooms/${encodeURIComponent(roomId)}`, {
+      accessToken
+    }),
+  getBoardSnapshot: (roomId: string, accessToken: string) =>
+    apiRequest<BoardSnapshotResponse>(`/rooms/${encodeURIComponent(roomId)}/board`, {
+      accessToken
+    }),
+  getVersionHistory: (roomId: string, accessToken: string) =>
+    apiRequest<VersionHistory>(`/rooms/${encodeURIComponent(roomId)}/versions`, {
+      accessToken
+    }),
+  createVersionTag: (roomId: string, input: CreateVersionTagInput, accessToken: string) =>
+    apiRequest<VersionTag>(`/rooms/${encodeURIComponent(roomId)}/versions/tags`, {
+      method: 'POST',
+      body: input,
+      accessToken
+    }),
+  restoreVersion: (roomId: string, version: number, accessToken: string) =>
+    apiRequest<{ roomId: string; version: number; restoredFromVersion: number }>(
+      `/rooms/${encodeURIComponent(roomId)}/versions/${version}/restore`,
+      { method: 'POST', accessToken }
+    ),
+  joinByInviteCode: (inviteCode: string, accessToken: string) =>
+    apiRequest<RoomSummary>('/rooms/join', {
+      method: 'POST',
+      body: { inviteCode },
+      accessToken
+    }),
+  deleteRoom: (roomId: string, accessToken: string) =>
+    apiRequest<{ success: true }>(`/rooms/${encodeURIComponent(roomId)}`, {
+      method: 'DELETE',
       accessToken
     })
 };

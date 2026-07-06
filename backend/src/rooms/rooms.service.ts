@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import type { Room, RoomMember, User } from '@prisma/client';
 import { Prisma } from '@prisma/client';
+import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RoomRole } from '../permissions/room-role.enum';
 import type { AddRoomMemberDto } from './dto/add-room-member.dto';
@@ -34,7 +35,8 @@ export class RoomsService {
       const createdRoom = await tx.room.create({
         data: {
           name: dto.name.trim(),
-          ownerId: userId
+          ownerId: userId,
+          inviteCode: generateInviteCode()
         }
       });
 
@@ -98,6 +100,30 @@ export class RoomsService {
     }
 
     return this.toRoomWithRole(membership.room, membership.role as RoomRole);
+  }
+
+  async joinByInviteCode(inviteCode: string, userId: string): Promise<RoomWithRole> {
+    const room = await this.prisma.room.findFirst({
+      where: { inviteCode }
+    });
+
+    if (!room) {
+      throw new NotFoundException('Room not found');
+    }
+
+    const existingMember = await this.prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: room.id, userId } }
+    });
+
+    if (existingMember) {
+      return this.toRoomWithRole(room, existingMember.role as RoomRole);
+    }
+
+    await this.prisma.roomMember.create({
+      data: { roomId: room.id, userId, role: RoomRole.EDITOR }
+    });
+
+    return this.toRoomWithRole(room, RoomRole.EDITOR);
   }
 
   async updateRoom(roomId: string, dto: UpdateRoomDto): Promise<Room> {
@@ -294,4 +320,8 @@ export class RoomsService {
       updatedAt: member.updatedAt
     };
   }
+}
+
+function generateInviteCode(): string {
+  return randomBytes(4).toString('base64url').toUpperCase().slice(0, 8);
 }

@@ -41,6 +41,7 @@ type BoardEventRequestPayload = {
   eventType?: unknown;
   payload?: unknown;
   baseVersion?: unknown;
+  clientOpId?: unknown;
 };
 
 type AuthenticatedSocketData = {
@@ -296,7 +297,8 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         actorId: user.id,
         eventType,
         payload: payload.payload as ApplyBoardEventInput['payload'],
-        baseVersion: this.parseBaseVersion(payload.baseVersion)
+        baseVersion: this.parseBaseVersion(payload.baseVersion),
+        clientOpId: typeof payload.clientOpId === 'string' ? payload.clientOpId : undefined
       });
       const acceptedPayload: BoardEventAcceptedPayload = {
         roomId: result.roomId,
@@ -319,6 +321,31 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         message: error instanceof HttpException ? error.message : 'Board event rejected'
       });
     }
+  }
+
+  @SubscribeMessage('shape:preview')
+  handleShapePreview(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: { roomId?: unknown; objectId?: unknown; transform?: unknown }
+  ): void {
+    const user = client.data.user;
+    if (!user) return;
+
+    const roomId = typeof payload?.roomId === 'string' ? payload.roomId : null;
+    const objectId = typeof payload?.objectId === 'string' ? payload.objectId : null;
+    const transform = typeof payload?.transform === 'object' && payload.transform !== null
+      ? payload.transform as Record<string, unknown>
+      : null;
+
+    if (!roomId || !objectId || !transform) return;
+
+    // Broadcast preview to everyone in the room except sender
+    client.to(this.getRoomChannel(roomId)).emit('shape:preview', {
+      roomId,
+      objectId,
+      transform,
+      byUser: { id: user.id, displayName: user.displayName }
+    });
   }
 
   private rejectConnection(client: AuthenticatedSocket): void {

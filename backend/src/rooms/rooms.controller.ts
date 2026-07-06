@@ -1,6 +1,7 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { AuthenticatedRequest } from '../auth/types';
+import { BoardService } from '../board/board.service';
 import { RequiredRoomRole } from '../permissions/required-room-role.decorator';
 import { RoomMemberGuard } from '../permissions/room-member.guard';
 import { RoomRole } from '../permissions/room-role.enum';
@@ -13,7 +14,10 @@ import { RoomsService } from './rooms.service';
 @Controller('rooms')
 @UseGuards(JwtAuthGuard)
 export class RoomsController {
-  constructor(private readonly roomsService: RoomsService) {}
+  constructor(
+    private readonly roomsService: RoomsService,
+    private readonly boardService: BoardService
+  ) {}
 
   @Post()
   create(@Req() request: AuthenticatedRequest, @Body() dto: CreateRoomDto) {
@@ -25,10 +29,27 @@ export class RoomsController {
     return this.roomsService.listRoomsForUser(request.user.id);
   }
 
+  @Post('join')
+  joinByCode(
+    @Req() request: AuthenticatedRequest,
+    @Body('inviteCode') inviteCode: string
+  ) {
+    if (!inviteCode || typeof inviteCode !== 'string') {
+      throw new BadRequestException('inviteCode is required');
+    }
+    return this.roomsService.joinByInviteCode(inviteCode.trim().toUpperCase(), request.user.id);
+  }
+
   @Get(':roomId/members')
   @UseGuards(RoomMemberGuard)
   listMembers(@Param('roomId') roomId: string) {
     return this.roomsService.listMembers(roomId);
+  }
+
+  @Get(':roomId/board')
+  @UseGuards(RoomMemberGuard)
+  getBoard(@Param('roomId') roomId: string) {
+    return this.boardService.getBoardSnapshotForRoom(roomId);
   }
 
   @Post(':roomId/members')

@@ -13,7 +13,7 @@ describe('boardStore', () => {
       boardVersion: 0,
       objects: {},
       roomId: null,
-      selectedObjectId: null,
+      selectedObjectIds: new Set(),
       tool: 'select',
       viewport: {
         x: 0,
@@ -161,6 +161,45 @@ describe('boardStore', () => {
         height: 40,
         stroke: '#1f6feb'
       }
+    });
+  });
+
+  it('applies accepted delete events and clears deleted selection', () => {
+    const existing = createBoardObject('rect-1');
+    useBoardStore.setState({
+      boardVersion: 1,
+      objects: {
+        [existing.id]: {
+          ...existing,
+          version: 1
+        }
+      },
+      selectedObjectIds: new Set([existing.id])
+    });
+
+    const deleteEvent = {
+      actorId: 'user-2',
+      eventType: 'object:delete' as const,
+      payload: {
+        objectId: 'rect-1',
+        expectedVersion: 1
+      },
+      roomId: 'room-1',
+      serverTime: '2026-06-10T01:00:00.000Z',
+      version: 2
+    };
+
+    useBoardStore.getState().applyAcceptedDeleteEvent(deleteEvent);
+    useBoardStore.getState().applyAcceptedDeleteEvent(deleteEvent);
+
+    const state = useBoardStore.getState();
+    expect(state.boardVersion).toBe(2);
+    expect(state.selectedObjectIds.size).toBe(0);
+    expect(state.objects['rect-1']).toMatchObject({
+      deleted: true,
+      version: 2,
+      updatedBy: 'user-2',
+      updatedAt: '2026-06-10T01:00:00.000Z'
     });
   });
 });

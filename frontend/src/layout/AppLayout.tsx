@@ -1,32 +1,15 @@
-import { NavLink, Outlet } from 'react-router-dom';
-import { useAuth } from '../auth/AuthContext';
+import { Outlet } from 'react-router-dom';
+import { AppHeader } from '../components/layout/app-header';
+import { MobileNav } from '../components/layout/mobile-nav';
 
 export function AppLayout() {
-  const auth = useAuth();
-
   return (
-    <div className="app-root">
-      <header className="app-header">
-        <NavLink className="app-brand" to="/dashboard">
-          Tactical Whiteboard
-        </NavLink>
-        <nav className="app-nav" aria-label="Primary navigation">
-          <NavLink to="/dashboard">Dashboard</NavLink>
-          {auth.status === 'authenticated' ? (
-            <button type="button" onClick={() => void auth.logout()}>
-              Logout
-            </button>
-          ) : (
-            <>
-              <NavLink to="/login">Login</NavLink>
-              <NavLink to="/register">Register</NavLink>
-            </>
-          )}
-        </nav>
-      </header>
-      <main className="app-main">
+    <div className="min-h-screen flex flex-col bg-background text-on-surface">
+      <AppHeader />
+      <main className="flex-1 pb-12 md:pb-0">
         <Outlet />
       </main>
+      <MobileNav />
     </div>
   );
 }

@@ -1,0 +1,222 @@
+@import 'tailwindcss';
+
+/* ---- Tactical Precision Design System ---- */
+
+@theme {
+  /* === Colors === */
+  --color-surface-dim: #0b1326;
+  --color-surface: #0b1326;
+  --color-surface-bright: #31394d;
+  --color-surface-container-lowest: #060e20;
+  --color-surface-container-low: #131b2e;
+  --color-surface-container: #171f33;
+  --color-surface-container-high: #222a3d;
+  --color-surface-container-highest: #2d3449;
+  --color-on-surface: #dae2fd;
+  --color-on-surface-variant: #bdc8d1;
+  --color-inverse-surface: #dae2fd;
+  --color-inverse-on-surface: #283044;
+  --color-outline: #87929a;
+  --color-outline-variant: #3e484f;
+  --color-surface-tint: #7bd0ff;
+
+  --color-primary: #8ed5ff;
+  --color-on-primary: #00354a;
+  --color-primary-container: #38bdf8;
+  --color-on-primary-container: #004965;
+  --color-inverse-primary: #00668a;
+  --color-primary-fixed: #c4e7ff;
+  --color-primary-fixed-dim: #7bd0ff;
+  --color-on-primary-fixed: #001e2c;
+  --color-on-primary-fixed-variant: #004c69;
+
+  --color-secondary: #ffb783;
+  --color-on-secondary: #4f2500;
+  --color-secondary-container: #d97722;
+  --color-on-secondary-container: #451f00;
+  --color-secondary-fixed: #ffdcc5;
+  --color-secondary-fixed-dim: #ffb783;
+  --color-on-secondary-fixed: #301400;
+  --color-on-secondary-fixed-variant: #713700;
+
+  --color-tertiary: #4ee6aa;
+  --color-on-tertiary: #003825;
+  --color-tertiary-container: #22c990;
+  --color-on-tertiary-container: #004e35;
+  --color-tertiary-fixed: #68fcbf;
+  --color-tertiary-fixed-dim: #45dfa4;
+  --color-on-tertiary-fixed: #002114;
+  --color-on-tertiary-fixed-variant: #005137;
+
+  --color-error: #ffb4ab;
+  --color-on-error: #690005;
+  --color-error-container: #93000a;
+  --color-on-error-container: #ffdad6;
+
+  --color-background: #0b1326;
+  --color-on-background: #dae2fd;
+  --color-canvas-bg: #020617;
+  --color-panel-bg: rgba(30, 41, 59, 0.7);
+  --color-stroke-default: #1f2937;
+  --color-fill-default: #dbeafe;
+  --color-selection-overlay: rgba(56, 189, 248, 0.15);
+
+  --color-user-alpha: #60a5fa;
+  --color-user-beta: #f472b6;
+  --color-user-gamma: #a78bfa;
+
+  /* === Typography === */
+  --font-headline-lg: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-headline-lg-mobile: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body-md: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-body-sm: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-label-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-label-code: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* === Spacing === */
+  --spacing-unit: 4px;
+  --spacing-gutter: 8px;
+  --spacing-margin-compact: 12px;
+  --spacing-panel-width: 280px;
+  --spacing-toolbar-height: 48px;
+
+  /* === Border Radius === */
+  --radius-DEFAULT: 0.125rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.5rem;
+  --radius-full: 0.75rem;
+
+  /* === Font Sizes === */
+  --text-headline-lg: 24px;
+  --text-headline-lg--line-height: 32px;
+  --text-headline-lg--letter-spacing: -0.02em;
+  --text-headline-lg--font-weight: 600;
+  --text-headline-md: 18px;
+  --text-headline-md--line-height: 24px;
+  --text-headline-md--font-weight: 600;
+  --text-headline-lg-mobile: 20px;
+  --text-headline-lg-mobile--line-height: 28px;
+  --text-headline-lg-mobile--font-weight: 600;
+  --text-body-md: 14px;
+  --text-body-md--line-height: 20px;
+  --text-body-md--font-weight: 400;
+  --text-body-sm: 12px;
+  --text-body-sm--line-height: 16px;
+  --text-body-sm--font-weight: 400;
+  --text-label-mono: 12px;
+  --text-label-mono--line-height: 16px;
+  --text-label-mono--letter-spacing: 0.02em;
+  --text-label-mono--font-weight: 500;
+  --text-label-code: 10px;
+  --text-label-code--line-height: 12px;
+  --text-label-code--font-weight: 400;
+}
+
+/* === Base Styles === */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-background);
+  color: var(--color-on-background);
+  font-family: var(--font-body-md);
+  font-size: var(--text-body-md);
+  line-height: var(--text-body-md--line-height);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* === Glassmorphism Utility === */
+.glass-panel {
+  background-color: var(--color-panel-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* === Grid Background Pattern === */
+.bg-grid-pattern {
+  background-size: 40px 40px;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+}
+
+/* === Material Symbols === */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* === Scrollbar Styling === */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--color-outline-variant);
+  border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-outline);
+}
+
+/* === Toast Animations === */
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateX(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+.toast-enter {
+  animation: toast-enter 0.3s ease-out;
+}
+
+/* === Selection === */
+::selection {
+  background-color: var(--color-selection-overlay);
+}
+
+/* === Focus Ring === */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-background), 0 0 0 4px var(--color-primary-container);
+}
+
+/* === Form Input Base === */
+.form-input-base {
+  background-color: var(--color-surface-container-highest);
+  border: 1px solid var(--color-stroke-default);
+  color: var(--color-on-surface);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.form-input-base:focus {
+  outline: none;
+  border-color: var(--color-primary-container);
+  box-shadow: 0 0 0 1px var(--color-primary-container) inset;
+}
+.form-input-base::placeholder {
+  color: var(--color-outline);
+}

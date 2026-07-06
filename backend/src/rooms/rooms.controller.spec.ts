@@ -7,6 +7,7 @@ import type { BoardState, Room, RoomMember, User } from '@prisma/client';
 import { Prisma, RoomRole as PrismaRoomRole } from '@prisma/client';
 import request from 'supertest';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { BoardService } from '../board/board.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RoomMemberGuard } from '../permissions/room-member.guard';
 import { UsersService } from '../users/users.service';
@@ -142,6 +143,12 @@ type BoardStateCreateArgs = {
   };
 };
 
+type BoardStateFindUniqueArgs = {
+  where: {
+    roomId: string;
+  };
+};
+
 type RoomMemberWithRoom = RoomMember & {
   room: Room;
 };
@@ -171,11 +178,17 @@ type PrismaMock = {
   };
   boardState: {
     create: jest.Mock<Promise<BoardState>, [BoardStateCreateArgs]>;
+    findUnique: jest.Mock<Promise<BoardState | null>, [BoardStateFindUniqueArgs]>;
   };
   $transaction: jest.Mock<Promise<Room>, [(tx: PrismaMock) => Promise<Room>]>;
   seedUser: (id: string, email: string) => User;
   seedRoom: (id: string, ownerId: string, name?: string) => Room;
   seedMembership: (roomId: string, userId: string, role: PrismaRoomRole) => RoomMember;
+  seedBoardState: (
+    roomId: string,
+    version: number,
+    snapshotJson: Prisma.InputJsonValue
+  ) => BoardState;
 };
 
 function createPrismaMock(): PrismaMock {
@@ -209,6 +222,7 @@ function createPrismaMock(): PrismaMock {
       id,
       name,
       ownerId,
+      inviteCode: null,
       createdAt: now,
       updatedAt: now
     };
@@ -234,6 +248,31 @@ function createPrismaMock(): PrismaMock {
     memberships.push(membership);
 
     return membership;
+  };
+
+  const seedBoardState = (
+    roomId: string,
+    version: number,
+    snapshotJson: Prisma.InputJsonValue
+  ): BoardState => {
+    boardStateCount += 1;
+
+    const existingIndex = boardStates.findIndex((item) => item.roomId === roomId);
+    const boardState: BoardState = {
+      id: `board-state-${boardStateCount}`,
+      roomId,
+      version,
+      snapshotJson: snapshotJson as Prisma.JsonValue,
+      updatedAt: new Date('2026-06-10T00:00:00.000Z')
+    };
+
+    if (existingIndex >= 0) {
+      boardStates[existingIndex] = boardState;
+    } else {
+      boardStates.push(boardState);
+    }
+
+    return boardState;
   };
 
   const prisma: PrismaMock = {
@@ -393,25 +432,17 @@ function createPrismaMock(): PrismaMock {
     },
     boardState: {
       create: jest.fn(async ({ data }: BoardStateCreateArgs) => {
-        boardStateCount += 1;
-
-        const boardState: BoardState = {
-          id: `board-state-${boardStateCount}`,
-          roomId: data.roomId,
-          version: data.version,
-          snapshotJson: data.snapshotJson as Prisma.JsonValue,
-          updatedAt: new Date()
-        };
-
-        boardStates.push(boardState);
-
-        return boardState;
+        return seedBoardState(data.roomId, data.version, data.snapshotJson);
+      }),
+      findUnique: jest.fn(async ({ where }: BoardStateFindUniqueArgs) => {
+        return boardStates.find((item) => item.roomId === where.roomId) ?? null;
       })
     },
     $transaction: jest.fn((callback: (tx: PrismaMock) => Promise<Room>) => callback(prisma)),
     seedUser,
     seedRoom,
-    seedMembership
+    seedMembership,
+    seedBoardState
   };
 
   return prisma;
@@ -443,6 +474,7 @@ describe('RoomsController', () => {
         JwtAuthGuard,
         Reflector,
         RoomMemberGuard,
+        BoardService,
         RoomsService,
         UsersService,
         {
@@ -547,6 +579,82 @@ describe('RoomsController', () => {
     }
   });
 
+  it('allows owner, editor, and viewer to load the latest board snapshot', async () => {
+    const ownerToken = seedUserWithToken('owner-1', 'owner@example.com');
+    const editorToken = seedUserWithToken('editor-1', 'editor@example.com');
+    const viewerToken = seedUserWithToken('viewer-1', 'viewer@example.com');
+    prisma.seedRoom('room-a', 'owner-1', 'Alpha');
+    prisma.seedMembership('room-a', 'owner-1', PrismaRoomRole.OWNER);
+    prisma.seedMembership('room-a', 'editor-1', PrismaRoomRole.EDITOR);
+    prisma.seedMembership('room-a', 'viewer-1', PrismaRoomRole.VIEWER);
+    prisma.seedBoardState('room-a', 7, {
+      objects: {
+        'rect-1': {
+          id: 'rect-1',
+          roomId: 'room-a',
+          type: 'rectangle',
+          x: 12,
+          y: 24,
+          rotation: 0,
+          version: 2,
+          createdBy: 'owner-1',
+          updatedBy: 'editor-1',
+          createdAt: '2026-06-10T00:00:00.000Z',
+          updatedAt: '2026-06-10T01:00:00.000Z',
+          deleted: false,
+          props: {
+            width: 80,
+            height: 40
+          }
+        }
+      }
+    });
+
+    for (const token of [ownerToken, editorToken, viewerToken]) {
+      await request(app.getHttpServer())
+        .get('/rooms/room-a/board')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+        .expect((response) => {
+          expect(response.body).toMatchObject({
+            roomId: 'room-a',
+            version: 7,
+            updatedAt: '2026-06-10T00:00:00.000Z',
+            objects: {
+              'rect-1': {
+                id: 'rect-1',
+                roomId: 'room-a',
+                type: 'rectangle',
+                x: 12,
+                y: 24,
+                props: {
+                  width: 80,
+                  height: 40
+                }
+              }
+            }
+          });
+        });
+    }
+  });
+
+  it('returns an empty board snapshot when a member room has no BoardState row', async () => {
+    const ownerToken = seedUserWithToken('owner-1', 'owner@example.com');
+    prisma.seedRoom('room-a', 'owner-1', 'Alpha');
+    prisma.seedMembership('room-a', 'owner-1', PrismaRoomRole.OWNER);
+
+    await request(app.getHttpServer())
+      .get('/rooms/room-a/board')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200)
+      .expect({
+        roomId: 'room-a',
+        version: 0,
+        objects: {},
+        updatedAt: null
+      });
+  });
+
   it('prevents non-members from viewing private rooms', async () => {
     const outsiderToken = seedUserWithToken('outsider-1', 'outsider@example.com');
     prisma.seedUser('owner-1', 'owner@example.com');
@@ -555,6 +663,18 @@ describe('RoomsController', () => {
 
     await request(app.getHttpServer())
       .get('/rooms/room-a')
+      .set('Authorization', `Bearer ${outsiderToken}`)
+      .expect(404);
+  });
+
+  it('prevents non-members from loading a private room board snapshot', async () => {
+    const outsiderToken = seedUserWithToken('outsider-1', 'outsider@example.com');
+    prisma.seedUser('owner-1', 'owner@example.com');
+    prisma.seedRoom('room-a', 'owner-1', 'Alpha');
+    prisma.seedMembership('room-a', 'owner-1', PrismaRoomRole.OWNER);
+
+    await request(app.getHttpServer())
+      .get('/rooms/room-a/board')
       .set('Authorization', `Bearer ${outsiderToken}`)
       .expect(404);
   });

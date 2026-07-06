@@ -404,6 +404,59 @@ describe('BoardService', () => {
     expect(prisma.boardEvent.create).not.toHaveBeenCalled();
   });
 
+  it('rejects update and delete events with stale object versions', () => {
+    const service = new BoardService(createPrismaMock() as unknown as PrismaService);
+    const snapshot: BoardSnapshot = {
+      objects: {
+        'object-1': {
+          id: 'object-1',
+          roomId: 'room-a',
+          type: 'rectangle',
+          x: 10,
+          y: 20,
+          rotation: 0,
+          version: 3,
+          createdBy: 'user-1',
+          updatedBy: 'user-2',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          deleted: false,
+          props: {
+            width: 100,
+            height: 50
+          }
+        }
+      }
+    };
+
+    expect(() =>
+      service.applyEventToSnapshot(snapshot, {
+        roomId: 'room-a',
+        actorId: 'user-1',
+        eventType: 'object:update',
+        payload: {
+          objectId: 'object-1',
+          expectedVersion: 2,
+          patch: {
+            x: 1
+          }
+        }
+      })
+    ).toThrow(ConflictException);
+
+    expect(() =>
+      service.applyEventToSnapshot(snapshot, {
+        roomId: 'room-a',
+        actorId: 'user-1',
+        eventType: 'object:delete',
+        payload: {
+          objectId: 'object-1',
+          expectedVersion: 2
+        }
+      })
+    ).toThrow(ConflictException);
+  });
+
   it('rejects updates and deletes for missing objects', () => {
     const prisma = createPrismaMock(createBoardState('room-a', 0));
     const service = new BoardService(prisma as unknown as PrismaService);

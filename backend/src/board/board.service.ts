@@ -38,11 +38,13 @@ export type CreateBoardObjectPayload = {
 
 export type UpdateBoardObjectPayload = {
   objectId: BoardObjectId;
+  expectedVersion?: number;
   patch: BoardObjectPatch;
 };
 
 export type DeleteBoardObjectPayload = {
   objectId: BoardObjectId;
+  expectedVersion?: number;
 };
 
 export type ApplyBoardEventInput = {
@@ -51,6 +53,7 @@ export type ApplyBoardEventInput = {
   eventType: BoardEventType;
   payload: CreateBoardObjectPayload | UpdateBoardObjectPayload | DeleteBoardObjectPayload;
   baseVersion?: number;
+  clientOpId?: string;
 };
 
 export type ApplyBoardEventResult = {
@@ -66,6 +69,13 @@ export type BoardStateResult = {
   roomId: RoomId;
   version: number;
   snapshot: BoardSnapshot;
+};
+
+export type BoardSnapshotResponse = {
+  roomId: RoomId;
+  version: number;
+  objects: Record<BoardObjectId, BoardObject>;
+  updatedAt: string | null;
 };
 
 export type BoardMissedEvent = {
@@ -109,6 +119,30 @@ export class BoardService {
       roomId,
       version: boardState.version,
       snapshot: this.normalizeSnapshot(boardState.snapshotJson)
+    };
+  }
+
+  async getBoardSnapshotForRoom(roomId: RoomId): Promise<BoardSnapshotResponse> {
+    const boardState = await this.prisma.boardState.findUnique({
+      where: {
+        roomId
+      }
+    });
+
+    if (!boardState) {
+      return {
+        roomId,
+        version: 0,
+        objects: {},
+        updatedAt: null
+      };
+    }
+
+    return {
+      roomId,
+      version: boardState.version,
+      objects: this.normalizeSnapshot(boardState.snapshotJson).objects,
+      updatedAt: boardState.updatedAt.toISOString()
     };
   }
 
@@ -276,6 +310,8 @@ export class BoardService {
       throw new NotFoundException('Board object not found');
     }
 
+    this.assertExpectedObjectVersion(existing.version, payload.expectedVersion);
+
     snapshot.objects[payload.objectId] = {
       ...existing,
       x: payload.patch.x ?? existing.x,
@@ -302,6 +338,8 @@ export class BoardService {
     if (!existing || existing.deleted) {
       throw new NotFoundException('Board object not found');
     }
+
+    this.assertExpectedObjectVersion(existing.version, payload.expectedVersion);
 
     snapshot.objects[payload.objectId] = {
       ...existing,
@@ -374,6 +412,7 @@ export class BoardService {
 
     return {
       objectId: payload.objectId,
+      expectedVersion: this.parseExpectedVersion(payload.expectedVersion),
       patch
     };
   }
@@ -384,8 +423,15 @@ export class BoardService {
     }
 
     return {
-      objectId: payload.objectId
+      objectId: payload.objectId,
+      expectedVersion: this.parseExpectedVersion(payload.expectedVersion)
     };
+  }
+
+  private assertExpectedObjectVersion(currentVersion: number, expectedVersion?: number): void {
+    if (typeof expectedVersion === 'number' && expectedVersion !== currentVersion) {
+      throw new ConflictException('Board object version conflict');
+    }
   }
 
   private toMissedEvent(event: PrismaBoardEvent): BoardMissedEvent {
@@ -471,6 +517,18 @@ export class BoardService {
   private parseOptionalNumber(value: unknown, fieldName: string): number {
     if (typeof value !== 'number') {
       throw new BadRequestException(`${fieldName} must be a number`);
+    }
+
+    return value;
+  }
+
+  private parseExpectedVersion(value: unknown): number | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new BadRequestException('expectedVersion must be a non-negative integer');
     }
 
     return value;
