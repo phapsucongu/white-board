@@ -79,6 +79,15 @@ export type CreateVersionTagInput = {
   label: string;
 };
 
+export type RoomMember = {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  role: RoomRole;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
@@ -207,6 +216,21 @@ export const apiClient = {
     }),
   deleteRoom: (roomId: string, accessToken: string) =>
     apiRequest<{ success: true }>(`/rooms/${encodeURIComponent(roomId)}`, {
+      method: 'DELETE',
+      accessToken
+    }),
+  listMembers: (roomId: string, accessToken: string) =>
+    apiRequest<RoomMember[]>(`/rooms/${encodeURIComponent(roomId)}/members`, {
+      accessToken
+    }),
+  updateMemberRole: (roomId: string, userId: string, role: RoomRole, accessToken: string) =>
+    apiRequest<RoomMember>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      body: { role },
+      accessToken
+    }),
+  removeMember: (roomId: string, userId: string, accessToken: string) =>
+    apiRequest<{ success: true }>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, {
       method: 'DELETE',
       accessToken
     })

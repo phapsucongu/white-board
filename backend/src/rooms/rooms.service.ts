@@ -120,10 +120,10 @@ export class RoomsService {
     }
 
     await this.prisma.roomMember.create({
-      data: { roomId: room.id, userId, role: RoomRole.EDITOR }
+      data: { roomId: room.id, userId, role: RoomRole.VIEWER }
     });
 
-    return this.toRoomWithRole(room, RoomRole.EDITOR);
+    return this.toRoomWithRole(room, RoomRole.VIEWER);
   }
 
   async updateRoom(roomId: string, dto: UpdateRoomDto): Promise<Room> {

@@ -17,6 +17,7 @@ import {
   getVersionActorLabel
 } from '../versions/versionHistory';
 import { ObjectDetailPanel } from '../components/board/ObjectDetailPanel';
+import { MemberManagement } from '../components/board/MemberManagement';
 import { RoleBadge } from '../components/ui/role-badge';
 import { StatusChip } from '../components/ui/status-chip';
 import { SectionHeading } from '../components/ui/section-heading';
@@ -249,41 +250,49 @@ export function RoomPage() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex relative overflow-hidden">
-        {/* Presence Panel (Left Sidebar) */}
+        {/* Presence + Member Management Panel (Left Sidebar) */}
         {showPresence && roomState.status === 'ready' && (
-          <aside className="absolute top-3 left-3 bottom-20 w-[260px] glass-panel rounded-xl flex flex-col shadow-lg z-30 overflow-hidden border border-white/5 bg-surface">
+          <aside className="absolute top-3 left-[72px] bottom-20 w-[260px] glass-panel rounded-xl flex flex-col shadow-lg z-30 overflow-hidden border border-white/5 bg-surface">
             <div className="p-4 border-b border-white/5">
               <SectionHeading
-                title="Active users"
-                subtitle={`${realtime.presenceUsers.length} connected`}
+                title="Room"
+                subtitle={`${realtime.presenceUsers.length} online`}
               />
             </div>
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+            {/* Active users section */}
+            <div className="max-h-[40%] overflow-y-auto custom-scrollbar">
+              <div className="px-3 pt-2 pb-1">
+                <h4 className="text-label-code text-on-surface-variant uppercase tracking-wider">Online now</h4>
+              </div>
               {realtime.presenceUsers.length === 0 ? (
-                <p className="text-body-sm text-on-surface-variant p-2">Waiting for presence...</p>
+                <p className="text-body-sm text-on-surface-variant px-3 pb-2">No one online</p>
               ) : (
-                <ul className="space-y-1">
+                <ul className="px-2 pb-2 space-y-0.5">
                   {realtime.presenceUsers.map((presenceUser) => (
                     <li
                       key={presenceUser.userId}
-                      className="flex items-center gap-3 p-2 rounded hover:bg-surface-container-high/50 transition-colors"
+                      className="flex items-center gap-2 p-1.5 rounded hover:bg-surface-container-high/50 transition-colors"
                     >
-                      <span className="w-8 h-8 rounded-full bg-primary/10 border border-outline-variant flex items-center justify-center text-primary text-label-mono font-medium shrink-0">
+                      <span className="w-6 h-6 rounded-full bg-primary/10 border border-outline-variant flex items-center justify-center text-primary text-[10px] font-medium shrink-0">
                         {getPresenceDisplayName(presenceUser).charAt(0).toUpperCase()}
                       </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-body-sm text-on-surface truncate font-medium">
-                          {getPresenceDisplayName(presenceUser)}
-                        </p>
-                        <p className="text-label-code text-on-surface-variant">
-                          {formatRoomRoleLabel(presenceUser.role)}
-                        </p>
-                      </div>
+                      <span className="text-body-sm text-on-surface truncate flex-1">
+                        {getPresenceDisplayName(presenceUser)}
+                      </span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-tertiary shrink-0" title="Online" />
                     </li>
                   ))}
                 </ul>
               )}
             </div>
+            {/* Member management section */}
+            <MemberManagement
+              accessToken={accessToken}
+              roomId={roomState.room.id}
+              currentUserId={user?.id ?? ''}
+              isOwner={activeRoom?.role === 'OWNER'}
+              runWithAuth={runWithAuth}
+            />
           </aside>
         )}
 
