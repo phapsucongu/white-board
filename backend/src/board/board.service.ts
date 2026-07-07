@@ -1,7 +1,15 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  Optional
+} from '@nestjs/common';
 import { Prisma, type BoardEvent as PrismaBoardEvent } from '@prisma/client';
 import type { BoardObject, BoardObjectId, BoardObjectType, RoomId, UserId } from '@whiteboard/shared';
 import { PrismaService } from '../prisma/prisma.service';
+import { decodeBoardEventPayload, encodeBoardEventPayload } from './board-event-payload.codec';
+import { ConflictResolutionService } from './conflict-resolution.service';
 
 export const BOARD_EVENT_TYPES = ['object:create', 'object:update', 'object:delete'] as const;
 
@@ -63,6 +71,7 @@ export type ApplyBoardEventResult = {
   payload: ApplyBoardEventInput['payload'];
   actorId: UserId;
   snapshot: BoardSnapshot;
+  clientOpId?: string;
 };
 
 export type BoardStateResult = {
@@ -102,7 +111,11 @@ export type BoardSyncResult =
 
 @Injectable()
 export class BoardService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional()
+    private readonly conflicts: ConflictResolutionService = new ConflictResolutionService()
+  ) {}
 
   async getBoardState(roomId: RoomId): Promise<BoardStateResult> {
     const boardState = await this.prisma.boardState.findUnique({
@@ -199,22 +212,68 @@ export class BoardService {
         }
       });
       const currentVersion = currentState?.version ?? 0;
+      const currentSnapshot = this.normalizeSnapshot(currentState?.snapshotJson);
+      let eventInput = input;
 
-      if (typeof input.baseVersion === 'number' && input.baseVersion !== currentVersion) {
-        throw new ConflictException('Board version conflict');
+      if (input.clientOpId) {
+        const existingEvent = await tx.boardEvent.findFirst({
+          where: {
+            roomId: input.roomId,
+            clientOpId: input.clientOpId
+          }
+        });
+
+        if (existingEvent) {
+          return {
+            roomId: input.roomId,
+            version: existingEvent.version,
+            eventType: existingEvent.eventType as BoardEventType,
+            payload: decodeBoardEventPayload(
+              existingEvent.eventType,
+              existingEvent.payloadJson
+            ) as ApplyBoardEventInput['payload'],
+            actorId: existingEvent.actorId,
+            snapshot: currentSnapshot,
+            clientOpId: existingEvent.clientOpId ?? undefined
+          };
+        }
       }
 
-      const currentSnapshot = this.normalizeSnapshot(currentState?.snapshotJson);
+      if (typeof input.baseVersion === 'number' && input.baseVersion !== currentVersion) {
+        const missedEvents = await tx.boardEvent.findMany({
+          where: {
+            roomId: input.roomId,
+            version: {
+              gt: input.baseVersion
+            }
+          },
+          orderBy: {
+            version: 'asc'
+          }
+        });
+
+        eventInput = this.conflicts.resolveStaleEvent({
+          currentSnapshot,
+          currentVersion,
+          input,
+          missedEvents
+        });
+      }
+
       const nextVersion = currentVersion + 1;
-      const nextSnapshot = this.applyEventToSnapshot(currentSnapshot, input, new Date());
+      const nextSnapshot = this.applyEventToSnapshot(currentSnapshot, eventInput, new Date());
 
       await tx.boardEvent.create({
         data: {
-          roomId: input.roomId,
+          roomId: eventInput.roomId,
           version: nextVersion,
-          eventType: input.eventType,
-          payloadJson: input.payload as unknown as Prisma.InputJsonValue,
-          actorId: input.actorId
+          eventType: eventInput.eventType,
+          payloadJson: encodeBoardEventPayload(
+            eventInput.eventType,
+            eventInput.payload
+          ) as unknown as Prisma.InputJsonValue,
+          actorId: eventInput.actorId,
+          ...(eventInput.clientOpId ? { clientOpId: eventInput.clientOpId } : {})
         }
       });
 
@@ -236,10 +295,11 @@ export class BoardService {
       return {
         roomId: input.roomId,
         version: nextVersion,
-        eventType: input.eventType,
-        payload: input.payload,
-        actorId: input.actorId,
-        snapshot: nextSnapshot
+        eventType: eventInput.eventType,
+        payload: eventInput.payload,
+        actorId: eventInput.actorId,
+        snapshot: nextSnapshot,
+        clientOpId: eventInput.clientOpId
       };
     });
   }
@@ -440,7 +500,7 @@ export class BoardService {
       roomId: event.roomId,
       version: event.version,
       eventType: event.eventType,
-      payload: event.payloadJson,
+      payload: decodeBoardEventPayload(event.eventType, event.payloadJson),
       actorId: event.actorId,
       createdAt: event.createdAt.toISOString()
     };

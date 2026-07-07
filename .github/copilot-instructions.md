@@ -1,36 +1,44 @@
 # GitHub Copilot Instructions
 
-This repository is a Realtime Collaborative Tactical Whiteboard.
+This repository is a real-time collaborative tactical whiteboard built as a pnpm monorepo.
 
-## Use this stack
+## Architecture at a glance
 
-Frontend: React + Vite + TypeScript, React-Konva, Zustand, TanStack Query.  
-Backend: NestJS + TypeScript, Socket.IO, PostgreSQL, Prisma.  
-Auth: JWT access token + refresh token rotation.
+- Frontend: React + Vite + TypeScript, Zustand, React-Konva, and Socket.IO client.
+- Backend: NestJS + TypeScript, Prisma, PostgreSQL, and Socket.IO server.
+- Shared types: workspace package in packages/shared.
+- Auth: JWT access tokens with refresh token rotation and room roles (OWNER, EDITOR, VIEWER).
 
-## Core behavior
+## What matters most
 
-- Users authenticate with accounts.
-- Rooms have roles: Owner, Editor, Viewer.
-- Editors and Owners can mutate board state.
-- Viewers can join and observe only.
-- Persistent board operations go through the server.
-- Ephemeral cursor/presence events are not persisted.
-- Reconnect uses `lastKnownVersion` and returns deltas or snapshot.
-- Version history uses board events and snapshots.
+- Board mutations are server-authoritative. Do not trust client-provided roles or bypass server validation.
+- Persistent board state should flow through the backend event-sourcing flow rather than being mutated only in the client.
+- Socket event names and payload contracts are part of the public protocol; changing them requires coordinated updates.
+- Keep changes scoped and avoid mixing unrelated features in one patch.
 
-## Copilot must avoid
+## Working conventions
 
-- Generating unvalidated Socket.IO handlers.
-- Trusting client-provided roles.
-- Changing event names without updating docs.
-- Storing secrets in source.
-- Mixing unrelated features in one change.
+- Prefer small, testable services and explicit DTOs/interfaces.
+- Follow strict TypeScript and clear error handling.
+- Use existing guards/middleware for auth and permission checks instead of adding ad-hoc checks.
+- Add or update tests for behavior changes when practical.
 
-## Preferred code style
+## Useful commands
 
-- TypeScript strict.
-- Explicit DTOs and interfaces.
-- Small services with testable functions.
-- Clear error handling.
-- Use guards/middleware for auth and role checks.
+- pnpm install
+- pnpm dev
+- pnpm build
+- pnpm test
+- cd backend && npx jest --passWithNoTests
+- cd frontend && npx vitest run --passWithNoTests
+- cd backend && npx prisma generate
+
+## Key places to inspect
+
+- backend/src/board for board event handling and persistence
+- backend/src/realtime for Socket.IO gateway and presence logic
+- backend/src/permissions for role-based access control
+- frontend/src/realtime and frontend/src/board for client-side realtime state and undo/redo behavior
+- backend/prisma/schema.prisma for the database model
+
+For full setup and workflow details, see README.md and CLAUDE.md.

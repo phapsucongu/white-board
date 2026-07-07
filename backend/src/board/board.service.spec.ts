@@ -3,6 +3,7 @@ import type { BoardEvent, BoardState } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BoardService, type ApplyBoardEventResult, type BoardSnapshot } from './board.service';
+import { BoardConflictException } from './conflict-resolution.service';
 
 type BoardStateFindUniqueArgs = {
   where: {
@@ -32,6 +33,7 @@ type BoardEventCreateArgs = {
     eventType: string;
     payloadJson: Prisma.InputJsonValue;
     actorId: string;
+    clientOpId?: string;
   };
 };
 
@@ -111,6 +113,7 @@ function createPrismaMock(initialState: BoardState | null = null): PrismaMock {
           eventType: data.eventType,
           payloadJson: data.payloadJson as Prisma.JsonValue,
           actorId: data.actorId,
+          clientOpId: data.clientOpId ?? null,
           createdAt: new Date('2026-01-01T00:00:00.000Z')
         };
 
@@ -256,7 +259,11 @@ describe('BoardService', () => {
         roomId: 'room-a',
         version: 1,
         eventType: 'object:create',
-        payloadJson: payload,
+        payloadJson: {
+          schemaVersion: 1,
+          eventType: 'object:create',
+          payload
+        },
         actorId: 'user-1'
       }
     });
@@ -402,6 +409,141 @@ describe('BoardService', () => {
       })
     ).rejects.toBeInstanceOf(ConflictException);
     expect(prisma.boardEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('auto-merges stale object updates when missed events changed different fields', async () => {
+    const prisma = createPrismaMock(createBoardState('room-a', 0));
+    const service = new BoardService(prisma as unknown as PrismaService);
+
+    await service.applyBoardEvent({
+      roomId: 'room-a',
+      actorId: 'user-1',
+      eventType: 'object:create',
+      baseVersion: 0,
+      payload: {
+        object: {
+          id: 'object-1',
+          type: 'rectangle',
+          x: 10,
+          y: 20,
+          props: {
+            color: 'blue',
+            width: 100
+          }
+        }
+      }
+    });
+
+    await service.applyBoardEvent({
+      roomId: 'room-a',
+      actorId: 'user-2',
+      eventType: 'object:update',
+      baseVersion: 1,
+      payload: {
+        objectId: 'object-1',
+        expectedVersion: 1,
+        patch: {
+          props: {
+            color: 'red'
+          }
+        }
+      }
+    });
+
+    const merged = await service.applyBoardEvent({
+      roomId: 'room-a',
+      actorId: 'user-3',
+      eventType: 'object:update',
+      baseVersion: 1,
+      payload: {
+        objectId: 'object-1',
+        expectedVersion: 1,
+        patch: {
+          x: 44
+        }
+      }
+    });
+
+    expect(merged.version).toBe(3);
+    expect(merged.payload).toEqual({
+      objectId: 'object-1',
+      expectedVersion: undefined,
+      patch: {
+        x: 44
+      }
+    });
+    expect(merged.snapshot.objects['object-1']).toMatchObject({
+      x: 44,
+      version: 3,
+      props: {
+        color: 'red',
+        width: 100
+      }
+    });
+  });
+
+  it('rejects stale object updates when missed events changed the same field', async () => {
+    const prisma = createPrismaMock(createBoardState('room-a', 0));
+    const service = new BoardService(prisma as unknown as PrismaService);
+
+    await service.applyBoardEvent({
+      roomId: 'room-a',
+      actorId: 'user-1',
+      eventType: 'object:create',
+      baseVersion: 0,
+      payload: {
+        object: {
+          id: 'text-1',
+          type: 'text',
+          x: 10,
+          y: 20,
+          props: {
+            text: 'Alpha'
+          }
+        }
+      }
+    });
+
+    await service.applyBoardEvent({
+      roomId: 'room-a',
+      actorId: 'user-2',
+      eventType: 'object:update',
+      baseVersion: 1,
+      payload: {
+        objectId: 'text-1',
+        expectedVersion: 1,
+        patch: {
+          props: {
+            text: 'Bravo'
+          }
+        }
+      }
+    });
+
+    const rejectedUpdate = service.applyBoardEvent({
+        roomId: 'room-a',
+        actorId: 'user-3',
+        eventType: 'object:update',
+        baseVersion: 1,
+        payload: {
+          objectId: 'text-1',
+          expectedVersion: 1,
+          patch: {
+            props: {
+              text: 'Charlie'
+            }
+          }
+        }
+      });
+
+    await expect(rejectedUpdate).rejects.toBeInstanceOf(BoardConflictException);
+    await expect(rejectedUpdate).rejects.toMatchObject({
+      details: expect.objectContaining({
+        objectId: 'text-1',
+        conflictingFields: ['props.text']
+      })
+    });
+    expect(prisma.boardEvent.create).toHaveBeenCalledTimes(2);
   });
 
   it('rejects update and delete events with stale object versions', () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { BoardObject, BoardObjectId } from '@whiteboard/shared';
 import { io, type Socket } from 'socket.io-client';
+import * as Y from 'yjs';
 import type { RoomRole } from '../api/client';
 import { env } from '../config/env';
 import {
@@ -13,6 +14,15 @@ import {
   type DeleteBoardObjectPayload,
   type UpdateBoardObjectPayload
 } from '../board/boardStore';
+import {
+  countPendingOfflineOperations,
+  enqueueOfflineOperation,
+  listConflictedOfflineOperations,
+  listOfflineOperations,
+  markOfflineOperationConflicted,
+  removeOfflineOperation,
+  type QueuedOperation
+} from './offlineOutbox';
 
 type BoardEventType = 'object:create' | 'object:update' | 'object:delete';
 
@@ -50,11 +60,22 @@ type PresenceUpdatePayload = {
   users: PresenceUser[];
 };
 
-type BoardEventRejectedPayload = {
+export type BoardConflictDetails = {
+  currentVersion: number;
+  objectId?: string;
+  conflictingFields?: string[];
+  clientPatch?: Record<string, unknown>;
+  serverPatch?: Record<string, unknown>;
+  currentObject?: BoardObject | null;
+};
+
+export type BoardEventRejectedPayload = {
   roomId?: string;
   eventType?: BoardEventType;
   reason: string;
   message: string;
+  clientOpId?: string;
+  details?: BoardConflictDetails;
 };
 
 type SocketErrorPayload = {
@@ -92,8 +113,20 @@ type BoardHistoryEntry = {
 };
 
 type PendingHistoryIntent = {
+  clientOpId: string;
   entry: BoardHistoryEntry;
   kind: 'normal' | 'redo' | 'undo';
+};
+
+type PendingHistoryDraft = Omit<PendingHistoryIntent, 'clientOpId'>;
+
+type BoardSnapshotRestoredPayload = {
+  roomId: string;
+  version: number;
+  restoredFromVersion: number;
+  actorId: string;
+  snapshot: BoardSnapshot;
+  serverTime: string;
 };
 
 export type RealtimeStatus = 'idle' | 'connecting' | 'joined' | 'error';
@@ -103,6 +136,50 @@ export type ShapePreview = {
   transform: Record<string, unknown>;
   byUser: { id: string; displayName: string | null };
 };
+
+export type LiveCursor = {
+  roomId: string;
+  userId: string;
+  displayName: string | null;
+  socketId: string;
+  position: { x: number; y: number };
+  updatedAt: string;
+};
+
+export type TextLease = {
+  roomId: string;
+  objectId: string;
+  userId: string;
+  displayName: string | null;
+  socketId?: string;
+  expiresAt: string;
+};
+
+export type RemoteObjectSelection = {
+  roomId: string;
+  userId: string;
+  displayName: string | null;
+  socketId: string;
+  objectIds: string[];
+  mode: 'selected' | 'editing';
+  updatedAt: string;
+};
+
+type TextLeaseUpdatePayload =
+  | TextLease
+  | {
+      roomId: string;
+      objectId: string;
+      lease: TextLease | null;
+    };
+
+type TextLeaseDeniedPayload = {
+  roomId: string;
+  objectId: string;
+  lease: TextLease;
+  message: string;
+};
+
 
 export function canMutateRoom(role?: RoomRole): boolean {
   return role === 'OWNER' || role === 'EDITOR';
@@ -118,6 +195,20 @@ export function normalizePresenceUsers(users: PresenceUser[]): PresenceUser[] {
       sensitivity: 'base'
     })
   );
+}
+
+export function formatBoardEventRejection(payload: BoardEventRejectedPayload): string {
+  if (payload.reason !== 'VERSION_CONFLICT') {
+    return payload.message;
+  }
+
+  const fields = payload.details?.conflictingFields?.filter(Boolean) ?? [];
+
+  if (fields.length === 0) {
+    return `${payload.message}. Please refresh and try again.`;
+  }
+
+  return `${payload.message}: ${fields.join(', ')}. Please review the latest version.`;
 }
 
 export function toCreateBoardObjectPayload(object: BoardObject): CreateBoardObjectPayload {
@@ -186,17 +277,28 @@ export function useRoomRealtime({
   roomId: string | null;
 }) {
   const socketRef = useRef<Socket | null>(null);
+  const optimisticCreatesRef = useRef<Map<string, BoardObjectId>>(new Map());
   const pendingHistoryRef = useRef<PendingHistoryIntent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [lastSnapshotRestore, setLastSnapshotRestore] =
+    useState<BoardSnapshotRestoredPayload | null>(null);
   const [pendingHistoryCount, setPendingHistoryCount] = useState(0);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [preview, setPreview] = useState<ShapePreview | null>(null);
+  const [liveCursors, setLiveCursors] = useState<LiveCursor[]>([]);
+  const [offlineConflicts, setOfflineConflicts] = useState<QueuedOperation[]>([]);
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const [remoteSelections, setRemoteSelections] = useState<RemoteObjectSelection[]>([]);
   const [redoStack, setRedoStack] = useState<BoardHistoryEntry[]>([]);
   const [status, setStatus] = useState<RealtimeStatus>('idle');
+  const [textLeases, setTextLeases] = useState<Record<string, TextLease>>({});
   const [undoStack, setUndoStack] = useState<BoardHistoryEntry[]>([]);
+  const addObject = useBoardStore((state) => state.addObject);
   const applyAcceptedCreateEvent = useBoardStore((state) => state.applyAcceptedCreateEvent);
   const applyAcceptedDeleteEvent = useBoardStore((state) => state.applyAcceptedDeleteEvent);
   const applyAcceptedUpdateEvent = useBoardStore((state) => state.applyAcceptedUpdateEvent);
+  const clearSelection = useBoardStore((state) => state.clearSelection);
+  const removeObject = useBoardStore((state) => state.removeObject);
   const setBoardSnapshot = useBoardStore((state) => state.setBoardSnapshot);
   const setBoardVersion = useBoardStore((state) => state.setBoardVersion);
 
@@ -205,19 +307,29 @@ export function useRoomRealtime({
     setPendingHistoryCount(pendingHistoryRef.current.length);
   }, []);
 
-  const dequeuePendingHistory = useCallback((): PendingHistoryIntent | null => {
-    const [intent, ...rest] = pendingHistoryRef.current;
-    pendingHistoryRef.current = rest;
-    setPendingHistoryCount(rest.length);
+  const removePendingHistory = useCallback((clientOpId?: string): PendingHistoryIntent | null => {
+    if (!clientOpId) {
+      return null;
+    }
+
+    const index = pendingHistoryRef.current.findIndex((intent) => intent.clientOpId === clientOpId);
+
+    if (index < 0) {
+      return null;
+    }
+
+    const [intent] = pendingHistoryRef.current.splice(index, 1);
+    pendingHistoryRef.current = [...pendingHistoryRef.current];
+    setPendingHistoryCount(pendingHistoryRef.current.length);
     return intent ?? null;
   }, []);
 
   const emitBoardEvent = useCallback(
-    (operation: BoardHistoryOperation, pendingHistory?: PendingHistoryIntent): boolean => {
+    (operation: BoardHistoryOperation, pendingHistory?: PendingHistoryDraft): boolean => {
       const socket = socketRef.current;
 
-      if (!socket || !roomId || status !== 'joined') {
-        setError('Realtime room is not ready');
+      if (!roomId) {
+        setError('Room is not ready');
         return false;
       }
 
@@ -229,41 +341,77 @@ export function useRoomRealtime({
         clientOpId: generateClientOpId()
       };
 
-      socket.emit('board:event', request);
+      if (operation.eventType === 'object:create' && isCreateBoardObjectPayload(operation.payload)) {
+        const optimisticObject = createOptimisticObjectFromPayload(
+          request.roomId,
+          operation.payload,
+          currentUserId
+        );
+        addObject(optimisticObject);
+        optimisticCreatesRef.current.set(request.clientOpId, optimisticObject.id);
+      }
+
+      if (!socket || !roomId || status !== 'joined') {
+        void enqueueOfflineOperation({
+          id: request.clientOpId,
+          roomId: request.roomId,
+          eventName: 'board:event',
+          payload: request
+        }).then(() => setOfflineQueueCount((count) => count + 1));
+        setError('Realtime unavailable; operation queued for sync');
+        return true;
+      }
 
       if (pendingHistory) {
-        enqueuePendingHistory(pendingHistory);
+        enqueuePendingHistory({
+          ...pendingHistory,
+          clientOpId: request.clientOpId
+        });
       }
+
+      socket.emit('board:event', request);
 
       return true;
     },
-    [enqueuePendingHistory, roomId, status]
+    [addObject, currentUserId, enqueuePendingHistory, roomId, status]
   );
 
   useEffect(() => {
     if (!enabled || !accessToken || !roomId) {
+      optimisticCreatesRef.current.clear();
       pendingHistoryRef.current = [];
       setPendingHistoryCount(0);
+      setLastSnapshotRestore(null);
       setPresenceUsers([]);
+      setLiveCursors([]);
+      setOfflineConflicts([]);
+      setOfflineQueueCount(0);
+      setRemoteSelections([]);
       setRedoStack([]);
       setStatus('idle');
+      setTextLeases({});
       setUndoStack([]);
       return;
     }
 
     setError(null);
+    setLastSnapshotRestore(null);
+    optimisticCreatesRef.current.clear();
     pendingHistoryRef.current = [];
     setPendingHistoryCount(0);
     setPresenceUsers([]);
+    setLiveCursors([]);
+    setOfflineConflicts([]);
+    setRemoteSelections([]);
     setRedoStack([]);
     setStatus('connecting');
+    setTextLeases({});
     setUndoStack([]);
 
     const socket = io(env.apiBaseUrl, {
       auth: {
         token: accessToken
       },
-      transports: ['websocket']
     });
     socketRef.current = socket;
 
@@ -289,6 +437,8 @@ export function useRoomRealtime({
       );
       setPresenceUsers(normalizePresenceUsers(payload.users ?? []));
       setStatus('joined');
+      void replayOfflineOutbox(roomId, socket, setOfflineQueueCount);
+      void refreshOfflineState(roomId, setOfflineQueueCount, setOfflineConflicts);
     });
 
     socket.on('presence:update', (payload: PresenceUpdatePayload) => {
@@ -311,9 +461,16 @@ export function useRoomRealtime({
         applyAcceptedDeleteEvent
       );
 
+      if (event.clientOpId) {
+        optimisticCreatesRef.current.delete(event.clientOpId);
+        void removeOfflineOperation(event.clientOpId).then(() =>
+          refreshOfflineState(roomId, setOfflineQueueCount, setOfflineConflicts)
+        );
+      }
+
       if (event.actorId === currentUserId) {
         completePendingHistory(
-          dequeuePendingHistory(),
+          removePendingHistory(event.clientOpId),
           setUndoStack,
           setRedoStack
         );
@@ -334,13 +491,42 @@ export function useRoomRealtime({
     });
 
     socket.on('board:event:rejected', (payload: BoardEventRejectedPayload) => {
-      dequeuePendingHistory();
-      setError(payload.message);
+      const optimisticObjectId = payload.clientOpId
+        ? optimisticCreatesRef.current.get(payload.clientOpId)
+        : undefined;
+
+      if (optimisticObjectId) {
+        removeObject(optimisticObjectId);
+        optimisticCreatesRef.current.delete(payload.clientOpId ?? '');
+      }
+
+      removePendingHistory(payload.clientOpId);
+      if (payload.clientOpId) {
+        void markOfflineOperationConflicted(payload.clientOpId, payload).then(() =>
+          refreshOfflineState(roomId, setOfflineQueueCount, setOfflineConflicts)
+        );
+      }
+      setError(formatBoardEventRejection(payload));
     });
 
-    socket.on('error', (payload: SocketErrorPayload) => {
+    socket.on('room:error', (payload: SocketErrorPayload) => {
       setError(payload.message);
       setStatus('error');
+    });
+
+    socket.on('board:snapshot:restored', (payload: BoardSnapshotRestoredPayload) => {
+      if (payload.roomId !== roomId) {
+        return;
+      }
+
+      optimisticCreatesRef.current.clear();
+      pendingHistoryRef.current = [];
+      setPendingHistoryCount(0);
+      setUndoStack([]);
+      setRedoStack([]);
+      clearSelection();
+      setBoardSnapshot(payload.roomId, payload.snapshot, payload.version);
+      setLastSnapshotRestore(payload);
     });
 
     socket.on('connect_error', (socketError) => {
@@ -360,6 +546,50 @@ export function useRoomRealtime({
       }
     });
 
+    socket.on('cursor:broadcast', (payload: LiveCursor) => {
+      if (payload.roomId !== roomId || payload.userId === currentUserId) return;
+      setLiveCursors((current) => upsertCursor(current, payload));
+    });
+
+    socket.on('cursor:remove', (payload: { roomId: string; socketId: string }) => {
+      if (payload.roomId !== roomId) return;
+      setLiveCursors((current) => current.filter((cursor) => cursor.socketId !== payload.socketId));
+    });
+
+    socket.on('selection:broadcast', (payload: RemoteObjectSelection) => {
+      if (payload.roomId !== roomId || payload.userId === currentUserId) return;
+      setRemoteSelections((current) => upsertSelection(current, payload));
+    });
+
+    socket.on('selection:remove', (payload: { roomId: string; socketId: string }) => {
+      if (payload.roomId !== roomId) return;
+      setRemoteSelections((current) =>
+        current.filter((selection) => selection.socketId !== payload.socketId)
+      );
+    });
+
+    socket.on('text:lease:update', (payload: TextLeaseUpdatePayload) => {
+      if ('lease' in payload) {
+        if (payload.roomId !== roomId) return;
+        setTextLeases((current) => {
+          const next = { ...current };
+          if (payload.lease) next[payload.objectId] = payload.lease;
+          else delete next[payload.objectId];
+          return next;
+        });
+        return;
+      }
+
+      if (payload.roomId !== roomId) return;
+      setTextLeases((current) => ({ ...current, [payload.objectId]: payload }));
+    });
+
+    socket.on('text:lease:denied', (payload: TextLeaseDeniedPayload) => {
+      if (payload.roomId !== roomId) return;
+      setTextLeases((current) => ({ ...current, [payload.objectId]: payload.lease }));
+      setError(payload.message);
+    });
+
     return () => {
       socket.off();
       socket.disconnect();
@@ -373,13 +603,25 @@ export function useRoomRealtime({
     applyAcceptedCreateEvent,
     applyAcceptedDeleteEvent,
     applyAcceptedUpdateEvent,
+    clearSelection,
     currentUserId,
-    dequeuePendingHistory,
     enabled,
+    removeObject,
+    removePendingHistory,
     roomId,
     setBoardSnapshot,
     setBoardVersion
   ]);
+
+  useEffect(() => {
+    if (status !== 'joined') return;
+
+    const interval = window.setInterval(() => {
+      setTextLeases((current) => removeExpiredLeases(current));
+    }, 5_000);
+
+    return () => window.clearInterval(interval);
+  }, [status]);
 
   const sendRectangleCreate = useCallback(
     (rectangle: BoardObject): boolean => {
@@ -469,18 +711,128 @@ export function useRoomRealtime({
     [emitBoardEvent]
   );
 
-  const sendShapePreview = useCallback(
-    (objectId: string, transform: Record<string, unknown>) => {
+  const sendCursorUpdate = useCallback(
+    (position: { x: number; y: number }) => {
       const socket = socketRef.current;
-      if (!socket || !roomId) return;
+      if (!socket || !roomId || status !== 'joined') return;
+      socket.emit('cursor:update', { roomId, position });
+    },
+    [roomId, status]
+  );
 
-      socket.emit('shape:preview', {
+  const sendSelectionUpdate = useCallback(
+    (objectIds: string[], mode: RemoteObjectSelection['mode'] = 'selected') => {
+      const socket = socketRef.current;
+      if (!socket || !roomId || status !== 'joined') return;
+      socket.emit('selection:update', {
         roomId,
-        objectId,
-        transform
+        objectIds,
+        mode
       });
     },
+    [roomId, status]
+  );
+
+  const claimTextLease = useCallback(
+    (objectId: string): boolean => {
+      const socket = socketRef.current;
+      if (!socket || !roomId || status !== 'joined') return false;
+      const lease = textLeases[objectId];
+
+      if (lease && lease.userId !== currentUserId && isTextLeaseActive(lease)) {
+        setError(`${lease.displayName || lease.userId} is editing this text`);
+        return false;
+      }
+
+      socket.emit('text:lease:claim', { roomId, objectId });
+      return true;
+    },
+    [currentUserId, roomId, status, textLeases]
+  );
+
+  const releaseTextLease = useCallback(
+    (objectId: string) => {
+      const socket = socketRef.current;
+      if (!socket || !roomId || status !== 'joined') return;
+      socket.emit('text:lease:release', { roomId, objectId });
+    },
+    [roomId, status]
+  );
+
+  const discardOfflineConflict = useCallback(
+    async (operationId: string): Promise<void> => {
+      await removeOfflineOperation(operationId);
+
+      if (roomId) {
+        await refreshOfflineState(roomId, setOfflineQueueCount, setOfflineConflicts);
+      }
+    },
     [roomId]
+  );
+
+  const retryOfflineConflict = useCallback(
+    async (operationId: string): Promise<boolean> => {
+      const operation = offlineConflicts.find((item) => item.id === operationId);
+
+      if (!operation || !roomId) {
+        return false;
+      }
+
+      const retryRequest = prepareRetryRequest(operation.payload);
+
+      if (!retryRequest) {
+        setError('Unable to retry this conflicted operation');
+        return false;
+      }
+
+      await removeOfflineOperation(operation.id);
+
+      const socket = socketRef.current;
+
+      if (!socket || status !== 'joined') {
+        await enqueueOfflineOperation({
+          id: retryRequest.clientOpId,
+          roomId: retryRequest.roomId,
+          eventName: 'board:event',
+          payload: retryRequest,
+          status: 'pending'
+        });
+        setError('Realtime unavailable; retry queued for sync');
+      } else {
+        socket.emit('board:event', retryRequest);
+      }
+
+      await refreshOfflineState(roomId, setOfflineQueueCount, setOfflineConflicts);
+      return true;
+    },
+    [offlineConflicts, roomId, status]
+  );
+
+  const sendTextEdit = useCallback(
+    (objectId: string, previousText: string, nextText: string): boolean => {
+      const socket = socketRef.current;
+      if (!socket || !roomId || status !== 'joined') {
+        setError('Realtime room is not ready');
+        return false;
+      }
+
+      const doc = new Y.Doc();
+      const text = doc.getText('content');
+      text.insert(0, previousText);
+      const stateVector = Y.encodeStateVector(doc);
+      text.delete(0, previousText.length);
+      text.insert(0, nextText);
+      const updateBase64 = uint8ToBase64(Y.encodeStateAsUpdate(doc, stateVector));
+
+      socket.emit('text:yjs:update', {
+        roomId,
+        objectId,
+        updateBase64
+      });
+
+      return true;
+    },
+    [roomId, status]
   );
 
   const sendObjectUpdate = useCallback(
@@ -595,20 +947,199 @@ export function useRoomRealtime({
     canRedo: redoStack.length > 0 && pendingHistoryCount === 0 && status === 'joined',
     canUndo: undoStack.length > 0 && pendingHistoryCount === 0 && status === 'joined',
     clearHistory,
+    claimTextLease,
+    discardOfflineConflict,
     error,
+    lastSnapshotRestore,
+    liveCursors,
+    offlineConflicts,
+    offlineQueueCount,
     pendingHistoryCount,
     presenceUsers,
     preview,
+    releaseTextLease,
+    retryOfflineConflict,
     redo,
+    remoteSelections,
     sendCircleCreate,
     sendLineCreate,
     sendObjectDelete,
     sendObjectUpdate,
+    sendCursorUpdate,
+    sendSelectionUpdate,
     sendRectangleCreate,
     sendTextCreate,
+    sendTextEdit,
     status,
+    textLeases,
     undo
   };
+}
+
+async function replayOfflineOutbox(
+  roomId: string,
+  socket: Socket,
+  setOfflineQueueCount: Dispatch<SetStateAction<number>>
+): Promise<void> {
+  const operations = await listOfflineOperations(roomId);
+  setOfflineQueueCount(operations.length);
+
+  for (const operation of operations) {
+    socket.emit(operation.eventName, operation.payload);
+  }
+}
+
+async function refreshOfflineState(
+  roomId: string,
+  setOfflineQueueCount: Dispatch<SetStateAction<number>>,
+  setOfflineConflicts: Dispatch<SetStateAction<QueuedOperation[]>>
+): Promise<void> {
+  const [pendingCount, conflicts] = await Promise.all([
+    countPendingOfflineOperations(roomId),
+    listConflictedOfflineOperations(roomId)
+  ]);
+  setOfflineQueueCount(pendingCount);
+  setOfflineConflicts(conflicts);
+}
+
+function upsertCursor(current: LiveCursor[], cursor: LiveCursor): LiveCursor[] {
+  return [
+    ...current.filter((item) => item.socketId !== cursor.socketId),
+    cursor
+  ];
+}
+
+function upsertSelection(
+  current: RemoteObjectSelection[],
+  selection: RemoteObjectSelection
+): RemoteObjectSelection[] {
+  return [
+    ...current.filter((item) => item.socketId !== selection.socketId),
+    selection
+  ];
+}
+
+function createOptimisticObjectFromPayload(
+  roomId: string,
+  payload: CreateBoardObjectPayload,
+  actorId: string | null
+): BoardObject {
+  const now = new Date().toISOString();
+
+  return {
+    id: payload.object.id,
+    roomId,
+    type: payload.object.type,
+    x: payload.object.x,
+    y: payload.object.y,
+    rotation: payload.object.rotation ?? 0,
+    version: 0,
+    createdBy: actorId ?? 'local-user',
+    updatedBy: actorId ?? 'local-user',
+    createdAt: now,
+    updatedAt: now,
+    deleted: false,
+    props: payload.object.props ?? {},
+    metadata: payload.object.metadata
+  };
+}
+
+function isTextLeaseActive(lease: TextLease): boolean {
+  return new Date(lease.expiresAt).getTime() > Date.now();
+}
+
+function removeExpiredLeases(leases: Record<string, TextLease>): Record<string, TextLease> {
+  const next = Object.fromEntries(
+    Object.entries(leases).filter(([, lease]) => isTextLeaseActive(lease))
+  );
+
+  return Object.keys(next).length === Object.keys(leases).length ? leases : next;
+}
+
+function prepareRetryRequest(payload: unknown): BoardEventRequestPayload | null {
+  if (!isBoardEventRequestPayload(payload)) {
+    return null;
+  }
+
+  const state = useBoardStore.getState();
+  const retryPayload = prepareRetryPayload(payload.eventType, payload.payload);
+
+  if (!retryPayload) {
+    return null;
+  }
+
+  return {
+    roomId: payload.roomId,
+    eventType: payload.eventType,
+    baseVersion: state.boardVersion,
+    payload: retryPayload,
+    clientOpId: generateClientOpId()
+  };
+}
+
+function prepareRetryPayload(
+  eventType: BoardEventType,
+  payload: BoardEventPayload
+): BoardEventPayload | null {
+  const state = useBoardStore.getState();
+
+  if (eventType === 'object:create' && isCreateBoardObjectPayload(payload)) {
+    return payload;
+  }
+
+  if (eventType === 'object:update' && isUpdateBoardObjectPayload(payload)) {
+    const existing = state.objects[payload.objectId];
+    if (!existing || existing.deleted) return null;
+
+    return {
+      ...payload,
+      expectedVersion: existing.version
+    };
+  }
+
+  if (eventType === 'object:delete' && isDeleteBoardObjectPayload(payload)) {
+    const existing = state.objects[payload.objectId];
+    if (!existing || existing.deleted) return null;
+
+    return {
+      ...payload,
+      expectedVersion: existing.version
+    };
+  }
+
+  return null;
+}
+
+function isBoardEventRequestPayload(value: unknown): value is BoardEventRequestPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'roomId' in value &&
+    typeof value.roomId === 'string' &&
+    'eventType' in value &&
+    (value.eventType === 'object:create' ||
+      value.eventType === 'object:update' ||
+      value.eventType === 'object:delete') &&
+    'payload' in value &&
+    isRetryableBoardPayload(value.eventType, value.payload)
+  );
+}
+
+function isRetryableBoardPayload(
+  eventType: BoardEventType,
+  payload: unknown
+): payload is BoardEventPayload {
+  return (
+    (eventType === 'object:create' && isCreateBoardObjectPayload(payload)) ||
+    (eventType === 'object:update' && isUpdateBoardObjectPayload(payload)) ||
+    (eventType === 'object:delete' && isDeleteBoardObjectPayload(payload))
+  );
+}
+
+function uint8ToBase64(value: Uint8Array): string {
+  let binary = '';
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 function createHistoryEntry(
@@ -681,6 +1212,11 @@ function applyRoomSync(
   }
 
   for (const event of payload.missedEvents ?? []) {
+    if (event.eventType === 'history.restore' && isHistoryRestorePayload(event.payload)) {
+      setBoardSnapshot(event.roomId, event.payload.restoredSnapshot, event.version);
+      continue;
+    }
+
     if (event.eventType === 'object:create' && isCreateBoardObjectPayload(event.payload)) {
       applyAcceptedCreateEvent({
         actorId: event.actorId,
@@ -716,6 +1252,16 @@ function applyRoomSync(
   }
 
   setBoardVersion(payload.currentVersion);
+}
+
+function isHistoryRestorePayload(value: unknown): value is { restoredSnapshot: BoardSnapshot } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'restoredSnapshot' in value &&
+    typeof value.restoredSnapshot === 'object' &&
+    value.restoredSnapshot !== null
+  );
 }
 
 function applyAcceptedBoardEvent(

@@ -1,7 +1,7 @@
 import type { BoardObject, BoardObjectId, RoomId } from '@whiteboard/shared';
 import { create } from 'zustand';
 
-export type CanvasTool = 'select' | 'pan' | 'rectangle' | 'circle' | 'line' | 'text';
+export type CanvasTool = 'select' | 'pan' | 'rectangle' | 'circle' | 'line' | 'text' | 'comment';
 
 export type BoardViewport = {
   x: number;
@@ -56,6 +56,7 @@ export type DeleteBoardObjectPayload = {
 
 export type BoardCreateAcceptedEvent = {
   actorId: string;
+  clientOpId?: string;
   eventType: 'object:create';
   payload: CreateBoardObjectPayload;
   roomId: RoomId;
@@ -65,6 +66,7 @@ export type BoardCreateAcceptedEvent = {
 
 export type BoardUpdateAcceptedEvent = {
   actorId: string;
+  clientOpId?: string;
   eventType: 'object:update';
   payload: UpdateBoardObjectPayload;
   roomId: RoomId;
@@ -74,6 +76,7 @@ export type BoardUpdateAcceptedEvent = {
 
 export type BoardDeleteAcceptedEvent = {
   actorId: string;
+  clientOpId?: string;
   eventType: 'object:delete';
   payload: DeleteBoardObjectPayload;
   roomId: RoomId;
@@ -104,6 +107,7 @@ type BoardStore = {
   clearSelection: () => void;
   initializeRoom: (roomId: RoomId) => void;
   resetViewport: () => void;
+  removeObject: (objectId: BoardObjectId) => void;
   selectObject: (objectId: BoardObjectId) => void;
   toggleObjectSelection: (objectId: BoardObjectId) => void;
   selectObjectsInRect: (rect: { x: number; y: number; width: number; height: number }) => void;
@@ -137,7 +141,9 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     })),
   applyAcceptedCreateEvent: (event) =>
     set((state) => {
-      if (event.version <= state.boardVersion && state.objects[event.payload.object.id]) {
+      const existing = state.objects[event.payload.object.id];
+
+      if (event.version <= state.boardVersion && existing && existing.version !== 0) {
         return { boardVersion: Math.max(state.boardVersion, event.version) };
       }
 
@@ -216,6 +222,15 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     });
   },
   resetViewport: () => set({ viewport: initialViewport }),
+  removeObject: (objectId) =>
+    set((state) => {
+      const objects = { ...state.objects };
+      delete objects[objectId];
+      return {
+        objects,
+        selectedObjectIds: new Set([...state.selectedObjectIds].filter((id) => id !== objectId))
+      };
+    }),
   selectObject: (objectId) => set({ selectedObjectIds: new Set([objectId]), tool: 'select' }),
   toggleObjectSelection: (objectId) =>
     set((state) => {

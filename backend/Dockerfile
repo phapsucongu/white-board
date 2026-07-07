@@ -21,4 +21,4 @@ COPY backend/prisma backend/prisma/
 RUN cd backend && npx prisma generate && npx nest build
 
 EXPOSE 3000
-CMD ["node", "backend/dist/main.js"]
+CMD ["sh", "-c", "cd backend && npx prisma migrate deploy && node dist/main.js"]

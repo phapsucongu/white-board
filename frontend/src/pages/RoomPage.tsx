@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { apiClient, type RoomSummary, type VersionHistory } from '../api/client';
+import { apiClient, type CommentSummary, type RoomSummary, type VersionHistory } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { BoardCanvas } from '../board/BoardCanvas';
 import { useBoardStore } from '../board/boardStore';
@@ -10,6 +10,7 @@ import {
   toMoveBoardObjectPayload,
   useRoomRealtime
 } from '../realtime/useRoomRealtime';
+import type { QueuedOperation } from '../realtime/offlineOutbox';
 import {
   canCreateVersionTag,
   formatVersionEventType,
@@ -19,7 +20,6 @@ import {
 import { ObjectDetailPanel } from '../components/board/ObjectDetailPanel';
 import { MemberManagement } from '../components/board/MemberManagement';
 import { RoleBadge } from '../components/ui/role-badge';
-import { StatusChip } from '../components/ui/status-chip';
 import { SectionHeading } from '../components/ui/section-heading';
 import { toastService } from '../components/ui/toaster';
 
@@ -42,9 +42,15 @@ export function RoomPage() {
   const [versionHistoryState, setVersionHistoryState] = useState<VersionHistoryState>({
     status: 'idle'
   });
-  const [showPresence, setShowPresence] = useState(true);
-  const [showVersions, setShowVersions] = useState(true);
+  const [showPresence, setShowPresence] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
+  const [showComments, setShowComments] = useState(false);
+  const [comments, setComments] = useState<CommentSummary[]>([]);
+  const [commentBody, setCommentBody] = useState('');
+  const [commentTarget, setCommentTarget] = useState<{ objectId?: string; x?: number; y?: number } | null>(null);
   const setBoardSnapshot = useBoardStore((state) => state.setBoardSnapshot);
+  const boardObjects = useBoardStore((state) => state.objects);
+  const selectedObjectIds = useBoardStore((state) => state.selectedObjectIds);
   const activeRoom = roomState.status === 'ready' ? roomState.room : null;
   const canDrawRectangle = canMutateRoom(activeRoom?.role);
   const canTagVersion = canCreateVersionTag(activeRoom?.role);
@@ -54,6 +60,11 @@ export function RoomPage() {
     enabled: Boolean(activeRoom),
     roomId: activeRoom?.id ?? null
   });
+
+  useEffect(() => {
+    if (!activeRoom) return;
+    realtime.sendSelectionUpdate([...selectedObjectIds], 'selected');
+  }, [activeRoom, realtime.sendSelectionUpdate, selectedObjectIds]);
 
   const loadVersionHistory = useCallback(() => {
     if (!activeRoom) {
@@ -112,6 +123,24 @@ export function RoomPage() {
   useEffect(() => {
     void loadVersionHistory();
   }, [loadVersionHistory]);
+
+  useEffect(() => {
+    if (!realtime.lastSnapshotRestore || !showVersions) return;
+    void loadVersionHistory();
+  }, [loadVersionHistory, realtime.lastSnapshotRestore, showVersions]);
+
+  const loadComments = useCallback(() => {
+    if (!activeRoom) return Promise.resolve();
+    return runWithAuth((accessToken) => apiClient.listComments(activeRoom.id, accessToken))
+      .then(setComments)
+      .catch((error: unknown) => {
+        toastService.error(error instanceof Error ? error.message : 'Unable to load comments');
+      });
+  }, [activeRoom, runWithAuth]);
+
+  useEffect(() => {
+    void loadComments();
+  }, [loadComments]);
 
   const handleCreateVersionTag = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -188,6 +217,54 @@ export function RoomPage() {
     [realtime.sendObjectDelete]
   );
 
+  const handleCreateComment = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!activeRoom || !commentTarget) return;
+      const body = commentBody.trim();
+      if (!body) return;
+
+      runWithAuth((accessToken) =>
+        apiClient.createComment(activeRoom.id, { ...commentTarget, body }, accessToken)
+      )
+        .then((comment) => {
+          setComments((current) => [...current, comment]);
+          setCommentBody('');
+          setCommentTarget(null);
+          toastService.success('Comment added');
+        })
+        .catch((error: unknown) => {
+          toastService.error(error instanceof Error ? error.message : 'Unable to create comment');
+        });
+    },
+    [activeRoom, commentBody, commentTarget, runWithAuth]
+  );
+
+  const handleResolveComment = useCallback(
+    (comment: CommentSummary) => {
+      if (!activeRoom) return;
+      runWithAuth((accessToken) =>
+        apiClient.updateComment(activeRoom.id, comment.id, { resolved: !comment.resolved }, accessToken)
+      )
+        .then((updated) => {
+          setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
+        })
+        .catch((error: unknown) => {
+          toastService.error(error instanceof Error ? error.message : 'Unable to update comment');
+        });
+    },
+    [activeRoom, runWithAuth]
+  );
+
+  const commentPins = comments.flatMap((comment) => {
+    if (typeof comment.x === 'number' && typeof comment.y === 'number') {
+      return [{ id: comment.id, x: comment.x, y: comment.y, resolved: comment.resolved }];
+    }
+
+    const object = comment.objectId ? boardObjects[comment.objectId] : null;
+    return object ? [{ id: comment.id, x: object.x, y: object.y, resolved: comment.resolved }] : [];
+  });
+
   return (
     <div className="h-[calc(100vh-48px)] flex flex-col bg-canvas-bg">
       {/* Top Toolbar */}
@@ -245,6 +322,14 @@ export function RoomPage() {
           >
             <span className="material-symbols-outlined text-lg">history</span>
           </button>
+          <button
+            className="text-on-surface-variant hover:text-on-surface transition-colors p-1"
+            onClick={() => setShowComments(!showComments)}
+            type="button"
+            title="Toggle comments"
+          >
+            <span className="material-symbols-outlined text-lg">comment</span>
+          </button>
         </div>
       </header>
 
@@ -287,7 +372,6 @@ export function RoomPage() {
             </div>
             {/* Member management section */}
             <MemberManagement
-              accessToken={accessToken}
               roomId={roomState.room.id}
               currentUserId={user?.id ?? ''}
               isOwner={activeRoom?.role === 'OWNER'}
@@ -303,17 +387,34 @@ export function RoomPage() {
             canEditObjects={canDrawRectangle}
             canRedo={canDrawRectangle && realtime.canRedo}
             canUndo={canDrawRectangle && realtime.canUndo}
+            commentPins={commentPins}
             currentUserId={user?.id ?? 'local-user'}
+            liveCursors={realtime.liveCursors}
             onCircleCommit={realtime.sendCircleCreate}
+            onCanvasCommentPoint={(point) => {
+              setCommentTarget({ x: point.x, y: point.y });
+              setShowComments(true);
+            }}
+            onCursorMove={realtime.sendCursorUpdate}
             onLineCommit={realtime.sendLineCreate}
+            onObjectEditStart={(objectId) => realtime.sendSelectionUpdate([objectId], 'editing')}
+            onObjectEditStop={() => realtime.sendSelectionUpdate([...selectedObjectIds], 'selected')}
             onObjectMoveCommit={handleObjectMoveCommit}
             onObjectsDelete={handleObjectsDelete}
             onObjectTransformCommit={handleObjectTransformCommit}
             onRectangleCommit={realtime.sendRectangleCreate}
             onTextCommit={realtime.sendTextCreate}
+            onTextEditBlocked={(lease) => {
+              toastService.error(`${lease.displayName || lease.userId} is editing this text`);
+            }}
+            onTextEditCommit={realtime.sendTextEdit}
+            onTextEditStart={realtime.claimTextLease}
+            onTextEditStop={realtime.releaseTextLease}
             onRedo={handleRedo}
             onUndo={handleUndo}
             roomId={roomState.room.id}
+            remoteSelections={realtime.remoteSelections}
+            textLeases={realtime.textLeases}
           />
         ) : roomState.status === 'loading' ? (
           <div className="flex-1 flex items-center justify-center bg-canvas-bg">
@@ -328,6 +429,131 @@ export function RoomPage() {
               </Link>
             </div>
           </div>
+        )}
+
+        {showComments && roomState.status === 'ready' && (
+          <aside className="absolute left-[72px] bottom-20 w-[320px] glass-panel rounded-xl flex flex-col shadow-lg z-30 overflow-hidden border border-white/5 bg-surface">
+            <div className="p-4 border-b border-white/5">
+              <SectionHeading
+                title="Comments"
+                subtitle={`${comments.filter((comment) => !comment.resolved).length} open`}
+                action={
+                  selectedObjectIds.size > 0 ? (
+                    <button
+                      className="text-label-code text-primary hover:text-primary-fixed"
+                      type="button"
+                      onClick={() => {
+                        const [objectId] = [...selectedObjectIds];
+                        setCommentTarget({ objectId });
+                      }}
+                    >
+                      Comment selected
+                    </button>
+                  ) : undefined
+                }
+              />
+            </div>
+            {commentTarget && (
+              <form onSubmit={handleCreateComment} className="p-3 border-b border-white/5">
+                <textarea
+                  className="w-full min-h-20 bg-surface-container-highest border border-stroke-default rounded px-3 py-2 text-body-sm text-on-surface placeholder:text-outline focus:outline-none focus:border-primary"
+                  placeholder="Add annotation..."
+                  value={commentBody}
+                  onChange={(event) => setCommentBody(event.target.value)}
+                />
+                <div className="flex justify-end gap-2 mt-2">
+                  <button
+                    className="px-3 py-1.5 text-body-sm text-on-surface-variant"
+                    type="button"
+                    onClick={() => { setCommentTarget(null); setCommentBody(''); }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="px-3 py-1.5 bg-primary text-on-primary rounded text-label-code disabled:opacity-50"
+                    disabled={!commentBody.trim()}
+                    type="submit"
+                  >
+                    Add
+                  </button>
+                </div>
+              </form>
+            )}
+            <ul className="max-h-[260px] overflow-y-auto custom-scrollbar p-2 space-y-2">
+              {comments.length === 0 && (
+                <li className="text-body-sm text-on-surface-variant p-2">No comments yet.</li>
+              )}
+              {comments.map((comment) => (
+                <li
+                  key={comment.id}
+                  className={`p-2 rounded border text-body-sm ${comment.resolved ? 'bg-surface-container-low/40 border-stroke-default/40 opacity-60' : 'bg-surface-container-low border-stroke-default'}`}
+                >
+                  <p className="text-on-surface mb-2">{comment.body}</p>
+                  <div className="flex items-center justify-between text-label-code text-on-surface-variant">
+                    <span>{comment.objectId ? 'Object annotation' : 'Canvas annotation'}</span>
+                    <button
+                      className="text-primary hover:text-primary-fixed"
+                      type="button"
+                      onClick={() => handleResolveComment(comment)}
+                    >
+                      {comment.resolved ? 'Reopen' : 'Resolve'}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        )}
+
+        {roomState.status === 'ready' && realtime.offlineConflicts.length > 0 && (
+          <aside className="absolute right-[88px] bottom-20 w-[360px] glass-panel rounded-xl flex flex-col shadow-lg z-40 overflow-hidden border border-error/30 bg-surface">
+            <div className="p-4 border-b border-white/5 flex items-center justify-between gap-3">
+              <SectionHeading
+                title="Sync conflicts"
+                subtitle={`${realtime.offlineConflicts.length} local change${realtime.offlineConflicts.length === 1 ? '' : 's'} need review`}
+              />
+              <span className="material-symbols-outlined text-error text-base">sync_problem</span>
+            </div>
+            <ul className="max-h-[320px] overflow-y-auto custom-scrollbar divide-y divide-white/5">
+              {realtime.offlineConflicts.map((operation) => {
+                const summary = describeOfflineConflict(operation);
+
+                return (
+                  <li key={operation.id} className="p-4 space-y-3">
+                    <div>
+                      <p className="text-body-sm text-on-surface">{summary.title}</p>
+                      <p className="text-label-code text-on-surface-variant">{summary.subtitle}</p>
+                    </div>
+                    {summary.fields.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {summary.fields.map((field) => (
+                          <span key={field} className="px-1.5 py-0.5 rounded bg-error/10 text-error text-label-code">
+                            {field}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="px-2.5 py-1.5 rounded border border-stroke-default text-label-code text-on-surface-variant hover:text-on-surface hover:border-primary transition-colors"
+                        onClick={() => void realtime.discardOfflineConflict(operation.id)}
+                      >
+                        Discard
+                      </button>
+                      <button
+                        type="button"
+                        className="px-2.5 py-1.5 rounded bg-primary text-on-primary text-label-code hover:bg-primary-fixed transition-colors"
+                        onClick={() => void realtime.retryOfflineConflict(operation.id)}
+                      >
+                        Retry latest
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </aside>
         )}
 
         {/* Version History Panel (Right Sidebar) */}
@@ -465,13 +691,10 @@ export function RoomPage() {
                                     apiClient.restoreVersion(activeRoom.id, versionEvent.version, accessToken)
                                   )
                                     .then((result) => {
-                                      toastService.success(`Restored to v${result.restoredFromVersion}. Undo/Redo stacks preserved for pre-restore operations.`);
-                                      return runWithAuth((accessToken) =>
-                                        apiClient.getBoardSnapshot(activeRoom.id, accessToken)
-                                      ).then((snapshot) => {
-                                        setBoardSnapshot(snapshot.roomId, { objects: snapshot.objects }, snapshot.version);
-                                        return loadVersionHistory();
-                                      });
+                                      toastService.success(`Restored to v${result.restoredFromVersion}. Local undo/redo history was cleared.`);
+                                      realtime.clearHistory();
+                                      setBoardSnapshot(result.roomId, result.snapshot, result.version);
+                                      return loadVersionHistory();
                                     })
                                     .catch((error: unknown) => {
                                       toastService.error(error instanceof Error ? error.message : 'Restore failed');
@@ -503,7 +726,64 @@ export function RoomPage() {
   );
 }
 
-function formatRoomRoleLabel(role?: string): string {
-  if (!role) return 'Member';
-  return role.charAt(0) + role.slice(1).toLowerCase();
+function describeOfflineConflict(operation: QueuedOperation): {
+  fields: string[];
+  subtitle: string;
+  title: string;
+} {
+  const conflict = isConflictPayload(operation.conflict) ? operation.conflict : null;
+  const request = isBoardEventRequest(operation.payload) ? operation.payload : null;
+  const fields = conflict?.details?.conflictingFields ?? [];
+  const objectId = conflict?.details?.objectId ?? request?.payload.objectId;
+  const eventType = request?.eventType ?? 'board:event';
+  const timestamp = operation.updatedAt ?? operation.createdAt;
+
+  return {
+    fields,
+    title: `${formatEventType(eventType)}${objectId ? ` on ${objectId}` : ''}`,
+    subtitle: `${conflict?.message ?? 'Local change could not sync'} · ${formatRelativeTime(timestamp)}`
+  };
+}
+
+function isConflictPayload(value: unknown): value is {
+  message?: string;
+  details?: {
+    objectId?: string;
+    conflictingFields?: string[];
+  };
+} {
+  return typeof value === 'object' && value !== null;
+}
+
+function isBoardEventRequest(value: unknown): value is {
+  eventType: string;
+  payload: {
+    objectId?: string;
+  };
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'eventType' in value &&
+    typeof value.eventType === 'string' &&
+    'payload' in value &&
+    typeof value.payload === 'object' &&
+    value.payload !== null
+  );
+}
+
+function formatEventType(eventType: string): string {
+  if (eventType === 'object:create') return 'Create object';
+  if (eventType === 'object:update') return 'Update object';
+  if (eventType === 'object:delete') return 'Delete object';
+  return 'Board change';
+}
+
+function formatRelativeTime(timestamp: string): string {
+  const diffMs = Date.now() - new Date(timestamp).getTime();
+  const diffMinutes = Math.max(0, Math.round(diffMs / 60_000));
+
+  if (diffMinutes < 1) return 'just now';
+  if (diffMinutes === 1) return '1 minute ago';
+  return `${diffMinutes} minutes ago`;
 }

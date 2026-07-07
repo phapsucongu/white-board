@@ -13,6 +13,7 @@ import {
   type BoardPoint
 } from './boardStore';
 import { ToolButton } from '../components/ui/tool-button';
+import type { LiveCursor, RemoteObjectSelection, TextLease } from '../realtime/useRoomRealtime';
 
 type BoardCanvasProps = {
   canDrawRectangle: boolean;
@@ -20,7 +21,13 @@ type BoardCanvasProps = {
   canEditObjects: boolean;
   canUndo: boolean;
   currentUserId: string;
+  commentPins?: Array<{ id: string; x: number; y: number; resolved: boolean }>;
+  liveCursors?: LiveCursor[];
   onCircleCommit: (circle: BoardObject) => void;
+  onCanvasCommentPoint?: (point: BoardPoint) => void;
+  onCursorMove?: (point: BoardPoint) => void;
+  onObjectEditStart?: (objectId: BoardObjectId) => void;
+  onObjectEditStop?: (objectId: BoardObjectId) => void;
   onLineCommit: (line: BoardObject) => void;
   onObjectMoveCommit: (objectId: BoardObjectId, position: { x: number; y: number }) => void;
   onObjectTransformCommit: (
@@ -30,9 +37,15 @@ type BoardCanvasProps = {
   onObjectsDelete?: (objectIds: BoardObjectId[]) => void;
   onRectangleCommit: (rectangle: BoardObject) => void;
   onTextCommit: (text: BoardObject) => void;
+  onTextEditCommit?: (objectId: BoardObjectId, previousText: string, nextText: string) => void;
+  onTextEditBlocked?: (lease: TextLease) => void;
+  onTextEditStart?: (objectId: BoardObjectId) => boolean | void;
+  onTextEditStop?: (objectId: BoardObjectId) => void;
   onRedo: () => void;
   onUndo: () => void;
   roomId: RoomId;
+  remoteSelections?: RemoteObjectSelection[];
+  textLeases?: Record<string, TextLease>;
 };
 
 type CanvasSize = { width: number; height: number };
@@ -44,6 +57,7 @@ type CircleDraft = { center: BoardPoint; current: BoardPoint };
 type LineDraft = { current: BoardPoint; start: BoardPoint };
 type RectangleDraft = { current: BoardPoint; start: BoardPoint };
 type TextInputState = { position: BoardPoint; visible: boolean };
+type TextEditState = { object: BoardObject; value: string } | null;
 
 type SelectionRect = { x: number; y: number; width: number; height: number } | null;
 
@@ -53,16 +67,28 @@ export const BoardCanvas = memo(function BoardCanvas({
   canRedo,
   canUndo,
   currentUserId,
+  commentPins = [],
+  liveCursors = [],
   onCircleCommit,
+  onCanvasCommentPoint,
+  onCursorMove,
   onLineCommit,
+  onObjectEditStart,
+  onObjectEditStop,
   onObjectMoveCommit,
   onObjectTransformCommit,
   onObjectsDelete,
   onRectangleCommit,
   onTextCommit,
+  onTextEditBlocked,
+  onTextEditCommit,
+  onTextEditStart,
+  onTextEditStop,
   onRedo,
   onUndo,
-  roomId
+  roomId,
+  remoteSelections = [],
+  textLeases = {}
 }: BoardCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const shapeRefs = useRef<Record<BoardObjectId, Konva.Node | null>>({});
@@ -72,6 +98,7 @@ export const BoardCanvas = memo(function BoardCanvas({
   const [lineDraft, setLineDraft] = useState<LineDraft | null>(null);
   const [rectangleDraft, setRectangleDraft] = useState<RectangleDraft | null>(null);
   const [textInput, setTextInput] = useState<TextInputState>({ position: { x: 0, y: 0 }, visible: false });
+  const [textEdit, setTextEdit] = useState<TextEditState>(null);
   const [textValue, setTextValue] = useState('');
   const [selectionRect, setSelectionRect] = useState<SelectionRect>(null);
   const [selStart, setSelStart] = useState<BoardPoint | null>(null);
@@ -111,6 +138,16 @@ export const BoardCanvas = memo(function BoardCanvas({
 
   useEffect(() => { initializeRoom(roomId); }, [initializeRoom, roomId]);
 
+  useEffect(() => {
+    if (!textEdit) return;
+
+    const interval = window.setInterval(() => {
+      onTextEditStart?.(textEdit.object.id);
+    }, 10_000);
+
+    return () => window.clearInterval(interval);
+  }, [onTextEditStart, textEdit]);
+
   // Attach Transformer to all selected nodes
   useEffect(() => {
     const transformer = transformerRef.current;
@@ -127,7 +164,7 @@ export const BoardCanvas = memo(function BoardCanvas({
 
   // Disable drawing tools if not allowed
   useEffect(() => {
-    if (!canDrawRectangle && (tool === 'rectangle' || tool === 'circle' || tool === 'line' || tool === 'text')) {
+    if (!canDrawRectangle && (tool === 'rectangle' || tool === 'circle' || tool === 'line' || tool === 'text' || tool === 'comment')) {
       setRectangleDraft(null);
       setCircleDraft(null);
       setLineDraft(null);
@@ -308,6 +345,14 @@ export const BoardCanvas = memo(function BoardCanvas({
         return;
       }
 
+      if (tool === 'comment' && canDrawRectangle) {
+        const pt = getBoardPoint(event.target.getStage(), viewport);
+        if (!pt) return;
+        onCanvasCommentPoint?.(pt);
+        setTool('select');
+        return;
+      }
+
       // Drawing tools
       if (isDrawingTool && canDrawRectangle) {
         const pt = getBoardPoint(event.target.getStage(), viewport);
@@ -329,7 +374,7 @@ export const BoardCanvas = memo(function BoardCanvas({
         setSelectionRect({ x: pt.x, y: pt.y, width: 0, height: 0 });
       }
     },
-    [tool, canDrawRectangle, clearSelection, viewport, isDrawingTool]
+    [tool, canDrawRectangle, clearSelection, viewport, isDrawingTool, onCanvasCommentPoint, setTool]
   );
 
   // Mouse move: update draft OR update selection rect
@@ -337,6 +382,7 @@ export const BoardCanvas = memo(function BoardCanvas({
     (event: Konva.KonvaEventObject<MouseEvent>) => {
       const pt = getBoardPoint(event.target.getStage(), viewport);
       if (!pt) return;
+      onCursorMove?.(pt);
 
       // Update drawing draft
       if (tool === 'rectangle' && rectangleDraft) {
@@ -357,7 +403,7 @@ export const BoardCanvas = memo(function BoardCanvas({
         setSelectionRect(normalizeRectangle(selStart, pt));
       }
     },
-    [tool, rectangleDraft, circleDraft, lineDraft, selStart, selectionRect, viewport]
+    [tool, rectangleDraft, circleDraft, lineDraft, selStart, selectionRect, viewport, onCursorMove]
   );
 
   // Mouse up: finalize drawing OR finalize selection
@@ -404,8 +450,9 @@ export const BoardCanvas = memo(function BoardCanvas({
     (objectId: BoardObjectId, event: Konva.KonvaEventObject<DragEvent>) => {
       if (!canEditObjects) return;
       onObjectMoveCommit(objectId, { x: event.target.x(), y: event.target.y() });
+      onObjectEditStop?.(objectId);
     },
-    [canEditObjects, onObjectMoveCommit]
+    [canEditObjects, onObjectEditStop, onObjectMoveCommit]
   );
 
   // Object transform end (resize/rotate)
@@ -420,8 +467,9 @@ export const BoardCanvas = memo(function BoardCanvas({
         width: node.width() ? Math.max(4, node.width() * sx) : undefined,
         height: node.height() ? Math.max(4, node.height() * sy) : undefined
       });
+      onObjectEditStop?.(objectId);
     },
-    [canEditObjects, onObjectTransformCommit]
+    [canEditObjects, onObjectEditStop, onObjectTransformCommit]
   );
 
   const handleTextSubmit = useCallback(() => {
@@ -433,6 +481,16 @@ export const BoardCanvas = memo(function BoardCanvas({
     onTextCommit(textObj);
   }, [currentUserId, onTextCommit, roomId, textInput.position, textValue]);
 
+  const handleTextEditSubmit = useCallback(() => {
+    if (!textEdit) return;
+    const nextText = textEdit.value.trim();
+    const previousText = getStr(textEdit.object, 'text', 'Text');
+    setTextEdit(null);
+    onTextEditStop?.(textEdit.object.id);
+    if (!nextText || nextText === previousText) return;
+    onTextEditCommit?.(textEdit.object.id, previousText, nextText);
+  }, [onTextEditCommit, onTextEditStop, textEdit]);
+
   return (
     <section className="relative flex-1 flex flex-col" aria-label="Canvas shell">
       {/* Floating Left Toolbar */}
@@ -442,6 +500,7 @@ export const BoardCanvas = memo(function BoardCanvas({
         <ToolButton icon="circle" label="Circle (C)" active={tool === 'circle'} disabled={!canDrawRectangle} onClick={() => setTool('circle')} />
         <ToolButton icon="show_chart" label="Line (L)" active={tool === 'line'} disabled={!canDrawRectangle} onClick={() => setTool('line')} />
         <ToolButton icon="text_fields" label="Text (T)" active={tool === 'text'} disabled={!canDrawRectangle} onClick={() => setTool('text')} />
+        <ToolButton icon="comment" label="Comment" active={tool === 'comment'} disabled={!canDrawRectangle} onClick={() => setTool('comment')} />
         <ToolButton icon="pan_tool" label="Pan (H)" active={tool === 'pan'} onClick={() => setTool('pan')} />
       </nav>
 
@@ -479,8 +538,33 @@ export const BoardCanvas = memo(function BoardCanvas({
         </div>
       )}
 
+      {textEdit && (
+        <div
+          className="absolute z-50 bg-surface-container border border-primary rounded shadow-lg p-2"
+          style={{
+            left: textEdit.object.x * viewport.scale + viewport.x + 8,
+            top: textEdit.object.y * viewport.scale + viewport.y + 8
+          }}
+        >
+          <input
+            autoFocus
+            className="bg-surface-container-highest border border-stroke-default rounded px-3 py-1.5 text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 transition-all min-w-[220px]"
+            value={textEdit.value}
+            onChange={(e) => setTextEdit({ ...textEdit, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleTextEditSubmit();
+              if (e.key === 'Escape') {
+                onTextEditStop?.(textEdit.object.id);
+                setTextEdit(null);
+              }
+            }}
+            onBlur={handleTextEditSubmit}
+          />
+        </div>
+      )}
+
       {/* Canvas Frame */}
-      <div className="flex-1 bg-white" ref={containerRef}>
+      <div className="flex-1 bg-white relative" ref={containerRef}>
         <Stage
           width={canvasSize.width}
           height={canvasSize.height}
@@ -510,13 +594,30 @@ export const BoardCanvas = memo(function BoardCanvas({
               <BoardObjectShape
                 key={object.id}
                 canEdit={canTransform}
+                lease={textLeases[object.id]}
                 object={object}
                 onDragEnd={handleObjectDragEnd}
+                onDragStart={(objectId) => onObjectEditStart?.(objectId)}
                 onTransformEnd={handleTransformEnd}
+                onTransformStart={(objectId) => onObjectEditStart?.(objectId)}
                 onRegisterNode={(node) => { shapeRefs.current[object.id] = node; }}
                 selected={selectedObjectIds.has(object.id)}
-                onSelect={(id) => {
-                  if (tool === 'select') toggleObjectSelection(id);
+                onSelect={(id, additive) => {
+                  if (tool !== 'select') return;
+                  if (additive) toggleObjectSelection(id);
+                  else selectObject(id);
+                }}
+                onTextEdit={(textObject) => {
+                  if (!canEditObjects || textObject.type !== 'text') return;
+                  const lease = textLeases[textObject.id];
+                  if (lease && lease.userId !== currentUserId && isActiveLease(lease)) {
+                    onTextEditBlocked?.(lease);
+                    return;
+                  }
+
+                  const leaseAccepted = onTextEditStart?.(textObject.id);
+                  if (leaseAccepted === false) return;
+                  setTextEdit({ object: textObject, value: getStr(textObject, 'text', 'Text') });
                 }}
               />
             ))}
@@ -527,6 +628,20 @@ export const BoardCanvas = memo(function BoardCanvas({
             {selectedObjects.map((o) => (
               <SelectionBox key={`sel-${o.id}`} bounds={getObjectBounds(o)} />
             ))}
+            {remoteSelections.flatMap((selection) =>
+              selection.objectIds.flatMap((objectId) => {
+                const object = objectsById[objectId];
+                if (!object || object.deleted) return [];
+                return (
+                  <RemoteSelectionBox
+                    key={`${selection.socketId}-${objectId}`}
+                    bounds={getObjectBounds(object)}
+                    label={`${selection.displayName || selection.userId} ${selection.mode}`}
+                    mode={selection.mode}
+                  />
+                );
+              })
+            )}
             {rectangleDraft && draftRectangle && (
               <Rect x={draftRectangle.x} y={draftRectangle.y} width={draftRectangle.width} height={draftRectangle.height}
                 fill="#dbeafe" opacity={0.45} stroke="#38bdf8" strokeWidth={2} dash={[6, 4]} />
@@ -544,6 +659,17 @@ export const BoardCanvas = memo(function BoardCanvas({
               <Rect x={selectionRect.x} y={selectionRect.y} width={selectionRect.width} height={selectionRect.height}
                 fill="rgba(56,189,248,0.08)" stroke="#38bdf8" strokeWidth={1} dash={[4, 4]} />
             )}
+            {commentPins.filter((pin) => !pin.resolved).map((pin) => (
+              <Circle
+                key={pin.id}
+                x={pin.x}
+                y={pin.y}
+                radius={7}
+                fill="#f59e0b"
+                stroke="#78350f"
+                strokeWidth={1.5}
+              />
+            ))}
           </Layer>
 
           {/* Transformer Layer */}
@@ -559,6 +685,20 @@ export const BoardCanvas = memo(function BoardCanvas({
             />
           </Layer>
         </Stage>
+        <div className="pointer-events-none absolute inset-0 z-40">
+          {liveCursors.map((cursor) => (
+            <div
+              key={cursor.socketId}
+              className="absolute text-[11px] text-white bg-primary px-1.5 py-0.5 rounded shadow"
+              style={{
+                left: cursor.position.x * viewport.scale + viewport.x,
+                top: cursor.position.y * viewport.scale + viewport.y
+              }}
+            >
+              {cursor.displayName || cursor.userId}
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -566,14 +706,18 @@ export const BoardCanvas = memo(function BoardCanvas({
 
 // ── BoardObjectShape ──
 function BoardObjectShape({
-  canEdit, object, onDragEnd, onTransformEnd, onRegisterNode, onSelect, selected
+  canEdit, lease, object, onDragEnd, onDragStart, onTextEdit, onTransformEnd, onTransformStart, onRegisterNode, onSelect, selected
 }: {
   canEdit: boolean;
+  lease?: TextLease;
   object: BoardObject;
   onDragEnd: (objectId: BoardObjectId, event: Konva.KonvaEventObject<DragEvent>) => void;
+  onDragStart: (objectId: BoardObjectId) => void;
+  onTextEdit: (object: BoardObject) => void;
   onTransformEnd: (objectId: BoardObjectId, event: Konva.KonvaEventObject<Event>) => void;
+  onTransformStart: (objectId: BoardObjectId) => void;
   onRegisterNode: (node: Konva.Node | null) => void;
-  onSelect: (objectId: BoardObjectId) => void;
+  onSelect: (objectId: BoardObjectId, additive: boolean) => void;
   selected: boolean;
 }) {
   const commonProps = {
@@ -583,8 +727,13 @@ function BoardObjectShape({
     shadowColor: '#38bdf8',
     x: object.x, y: object.y,
     onDragEnd: (event: Konva.KonvaEventObject<DragEvent>) => onDragEnd(object.id, event),
-    onClick: () => onSelect(object.id),
-    onTap: () => onSelect(object.id),
+    onDragStart: () => onDragStart(object.id),
+    onClick: (event: Konva.KonvaEventObject<MouseEvent>) => onSelect(
+      object.id,
+      event.evt.ctrlKey || event.evt.metaKey
+    ),
+    onTap: () => onSelect(object.id, false),
+    onDblClick: () => onTextEdit(object),
   };
 
   if (object.type === 'rectangle') {
@@ -593,6 +742,7 @@ function BoardObjectShape({
         width={getNum(object, 'width', 140)} height={getNum(object, 'height', 90)}
         fill={getStr(object, 'fill', '#dbeafe')} stroke={getStr(object, 'stroke', '#38bdf8')}
         strokeWidth={getNum(object, 'strokeWidth', 2)}
+        onTransformStart={() => onTransformStart(object.id)}
         onTransformEnd={(e) => onTransformEnd(object.id, e)} />
     );
   }
@@ -602,6 +752,7 @@ function BoardObjectShape({
         radius={getNum(object, 'radius', 48)}
         fill={getStr(object, 'fill', '#ecfccb')} stroke={getStr(object, 'stroke', '#4d7c0f')}
         strokeWidth={getNum(object, 'strokeWidth', 2)}
+        onTransformStart={() => onTransformStart(object.id)}
         onTransformEnd={(e) => onTransformEnd(object.id, e)} />
     );
   }
@@ -611,14 +762,28 @@ function BoardObjectShape({
         points={getNumArr(object, 'points', [0, 0, 120, 36])}
         stroke={getStr(object, 'stroke', '#0f766e')} strokeWidth={getNum(object, 'strokeWidth', 4)}
         lineCap="round" lineJoin="round"
+        onTransformStart={() => onTransformStart(object.id)}
         onTransformEnd={(e) => onTransformEnd(object.id, e)} />
     );
   }
   return (
-    <Text {...commonProps} ref={onRegisterNode}
-      text={getStr(object, 'text', 'Text')} width={getNum(object, 'width', 220)}
-      fill={getStr(object, 'fill', '#dae2fd')} fontSize={getNum(object, 'fontSize', 20)} fontStyle="600"
-      onTransformEnd={(e) => onTransformEnd(object.id, e)} />
+    <>
+      <Text {...commonProps} ref={onRegisterNode}
+        text={getStr(object, 'text', 'Text')} width={getNum(object, 'width', 220)}
+        fill={getStr(object, 'fill', '#dae2fd')} fontSize={getNum(object, 'fontSize', 20)} fontStyle="600"
+        onTransformStart={() => onTransformStart(object.id)}
+        onTransformEnd={(e) => onTransformEnd(object.id, e)} />
+      {lease && (
+        <Text
+          x={object.x}
+          y={object.y - 20}
+          text={`${lease.displayName || lease.userId} editing`}
+          fontSize={11}
+          fill="#0284c7"
+          listening={false}
+        />
+      )}
+    </>
   );
 }
 
@@ -627,6 +792,40 @@ function SelectionBox({ bounds }: { bounds: ObjectBounds }) {
   return (
     <Rect x={bounds.x - 8} y={bounds.y - 8} width={bounds.width + 16} height={bounds.height + 16}
       stroke="#38bdf8" strokeWidth={1.5} dash={[6, 4]} listening={false} />
+  );
+}
+
+function RemoteSelectionBox({
+  bounds,
+  label,
+  mode
+}: {
+  bounds: ObjectBounds;
+  label: string;
+  mode: 'selected' | 'editing';
+}) {
+  const stroke = mode === 'editing' ? '#f59e0b' : '#8b5cf6';
+  return (
+    <>
+      <Rect
+        x={bounds.x - 10}
+        y={bounds.y - 10}
+        width={bounds.width + 20}
+        height={bounds.height + 20}
+        stroke={stroke}
+        strokeWidth={2}
+        dash={[7, 5]}
+        listening={false}
+      />
+      <Text
+        x={bounds.x - 10}
+        y={bounds.y - 28}
+        text={label}
+        fontSize={12}
+        fill={stroke}
+        listening={false}
+      />
+    </>
   );
 }
 
@@ -684,6 +883,10 @@ function getStr(obj: BoardObject, key: string, fallback: string): string {
 }
 function getNumArr(obj: BoardObject, key: string, fallback: number[]): number[] {
   const v = obj.props[key]; return Array.isArray(v) && v.every((i) => typeof i === 'number') ? v as number[] : fallback;
+}
+
+function isActiveLease(lease: TextLease): boolean {
+  return new Date(lease.expiresAt).getTime() > Date.now();
 }
 
 function clampScale(scale: number): number {

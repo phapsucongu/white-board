@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { BoardObject } from '@whiteboard/shared';
 import {
   canMutateRoom,
+  formatBoardEventRejection,
   getPresenceDisplayName,
   normalizePresenceUsers,
   toCreateBoardObjectPayload,
@@ -129,5 +130,19 @@ describe('useRoomRealtime helpers', () => {
       objectId: 'rect-1',
       expectedVersion: 2
     });
+  });
+
+  it('formats conflict rejections with conflicting fields', () => {
+    expect(
+      formatBoardEventRejection({
+        reason: 'VERSION_CONFLICT',
+        message: 'Board version conflict',
+        details: {
+          currentVersion: 12,
+          objectId: 'text-1',
+          conflictingFields: ['props.text']
+        }
+      })
+    ).toBe('Board version conflict: props.text. Please review the latest version.');
   });
 });

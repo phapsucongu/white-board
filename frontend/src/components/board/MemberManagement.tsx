@@ -3,14 +3,13 @@ import { apiClient, type RoomMember, type RoomRole } from '../../api/client';
 import { toastService } from '../ui/toaster';
 
 type MemberManagementProps = {
-  accessToken: string | null;
   roomId: string;
   currentUserId: string;
   isOwner: boolean;
   runWithAuth: <T>(fn: (token: string) => Promise<T>) => Promise<T>;
 };
 
-export function MemberManagement({ accessToken, roomId, currentUserId, isOwner, runWithAuth }: MemberManagementProps) {
+export function MemberManagement({ roomId, currentUserId, isOwner, runWithAuth }: MemberManagementProps) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

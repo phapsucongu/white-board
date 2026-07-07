@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { RoomRole } from '@prisma/client';
@@ -7,10 +8,12 @@ import {
   type ApplyBoardEventResult,
   type BoardSyncResult
 } from '../board/board.service';
+import { CollaborationService } from '../collaboration/collaboration.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { PublicUser } from '../users/users.service';
 import { UsersService } from '../users/users.service';
 import { PresenceService } from './presence.service';
+import { RealtimeRoomEventsService } from './realtime-room-events.service';
 import { RoomGateway } from './room.gateway';
 
 const jwtSecret = 'test-websocket-secret';
@@ -48,6 +51,22 @@ type UsersMock = {
 type BoardMock = {
   applyBoardEvent: jest.Mock<Promise<ApplyBoardEventResult>, [ApplyBoardEventInput]>;
   getReconnectSync: jest.Mock<Promise<BoardSyncResult>, [string, number?]>;
+};
+
+type CollaborationMock = {
+  attachSocketAdapter: jest.Mock<void, []>;
+  removeSocket: jest.Mock<null, [string]>;
+  removeObjectSelection: jest.Mock<null, [string]>;
+  removeTextLeasesForSocket: jest.Mock<unknown[], [string]>;
+  recordCursor: jest.Mock;
+  recordObjectSelection: jest.Mock;
+  claimTextLease: jest.Mock;
+  releaseTextLease: jest.Mock;
+  applyTextUpdate: jest.Mock;
+};
+
+type RoomEventsMock = {
+  attachServer: jest.Mock<void, [unknown]>;
 };
 
 type FakeClient = {
@@ -111,6 +130,7 @@ function createGateway() {
       eventType: input.eventType,
       payload: input.payload,
       actorId: input.actorId,
+      clientOpId: input.clientOpId,
       snapshot: {
         objects: {}
       }
@@ -124,6 +144,17 @@ function createGateway() {
   const config = new ConfigService({
     JWT_ACCESS_SECRET: jwtSecret
   });
+  const collaboration: CollaborationMock = {
+    attachSocketAdapter: jest.fn(),
+    removeSocket: jest.fn<null, [string]>(() => null),
+    removeObjectSelection: jest.fn<null, [string]>(() => null),
+    removeTextLeasesForSocket: jest.fn<unknown[], [string]>(() => []),
+    recordCursor: jest.fn(),
+    recordObjectSelection: jest.fn(),
+    claimTextLease: jest.fn(),
+    releaseTextLease: jest.fn(),
+    applyTextUpdate: jest.fn()
+  };
   const jwt: JwtMock = {
     verifyAsync: jest.fn<Promise<{ sub: string; email: string }>, [string, { secret: string }]>(async () => ({
       sub: user.id,
@@ -141,12 +172,17 @@ function createGateway() {
     findPublicById: jest.fn<Promise<PublicUser | null>, [string]>(async () => user)
   };
   const presence = new PresenceService();
+  const roomEvents: RoomEventsMock = {
+    attachServer: jest.fn()
+  };
   const gateway = new RoomGateway(
     board as unknown as BoardService,
+    collaboration as unknown as CollaborationService,
     config,
     jwt as unknown as JwtService,
     prisma as unknown as PrismaService,
     presence,
+    roomEvents as unknown as RealtimeRoomEventsService,
     users as unknown as UsersService
   );
   const roomEmit = jest.fn<void, [string, unknown]>();
@@ -162,10 +198,12 @@ function createGateway() {
 
   return {
     board,
+    collaboration,
     gateway,
     jwt,
     prisma,
     roomEmit,
+    roomEvents,
     to,
     user,
     users
@@ -274,7 +312,7 @@ describe('RoomGateway', () => {
     });
 
     expect(join).not.toHaveBeenCalled();
-    expect(emit).toHaveBeenCalledWith('error', {
+    expect(emit).toHaveBeenCalledWith('room:error', {
       code: 'FORBIDDEN',
       message: 'Room membership required'
     });
@@ -315,7 +353,7 @@ describe('RoomGateway', () => {
     await gateway.handleConnection(client);
 
     expect(disconnect).toHaveBeenCalledWith(true);
-    expect(emit).toHaveBeenCalledWith('error', {
+    expect(emit).toHaveBeenCalledWith('room:error', {
       code: 'UNAUTHORIZED',
       message: 'Authentication required'
     });
@@ -329,7 +367,7 @@ describe('RoomGateway', () => {
     await gateway.handleRoomJoin(client, {});
 
     expect(join).not.toHaveBeenCalled();
-    expect(emit).toHaveBeenCalledWith('error', {
+    expect(emit).toHaveBeenCalledWith('room:error', {
       code: 'VALIDATION_ERROR',
       message: 'roomId is required'
     });
@@ -384,6 +422,110 @@ describe('RoomGateway', () => {
       version: 1,
       eventType: 'object:create',
       actorId: 'user-1'
+    });
+  });
+
+  it('echoes client operation ids on accepted board events', async () => {
+    const { board, gateway } = createGateway();
+    const { client, emit } = createClient();
+
+    await gateway.handleConnection(client);
+    await gateway.handleBoardEvent(client, {
+      roomId: 'room-a',
+      eventType: 'object:update',
+      clientOpId: 'client-op-1',
+      payload: {
+        objectId: 'object-1',
+        patch: {
+          x: 30
+        }
+      }
+    });
+
+    expect(board.applyBoardEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientOpId: 'client-op-1'
+      })
+    );
+    expect(emit).toHaveBeenCalledWith(
+      'board:event:accepted',
+      expect.objectContaining({
+        clientOpId: 'client-op-1'
+      })
+    );
+  });
+
+  it('denies text lease claims when another user owns an active lease', async () => {
+    const { collaboration, gateway, roomEmit, to } = createGateway();
+    const { client, emit } = createClient();
+    const lease = {
+      roomId: 'room-a',
+      objectId: 'text-1',
+      userId: 'user-2',
+      displayName: 'User 2',
+      socketId: 'socket-2',
+      expiresAt: new Date(Date.now() + 30_000).toISOString()
+    };
+    collaboration.claimTextLease.mockReturnValueOnce({
+      acquired: false,
+      lease
+    });
+
+    await gateway.handleConnection(client);
+    await gateway.handleTextLeaseClaim(client, {
+      roomId: 'room-a',
+      objectId: 'text-1'
+    });
+
+    expect(to).not.toHaveBeenCalled();
+    expect(roomEmit).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith('text:lease:denied', {
+      roomId: 'room-a',
+      objectId: 'text-1',
+      lease,
+      message: 'User 2 is editing this text'
+    });
+    expect(emit).toHaveBeenCalledWith('text:lease:update', lease);
+  });
+
+  it('returns client operation ids and details on rejected board events', async () => {
+    const { board, gateway } = createGateway();
+    const { client, emit } = createClient();
+    board.applyBoardEvent.mockRejectedValueOnce(
+      new ConflictException({
+        message: 'Board version conflict',
+        details: {
+          currentVersion: 3,
+          objectId: 'object-1',
+          conflictingFields: ['x']
+        }
+      })
+    );
+
+    await gateway.handleConnection(client);
+    await gateway.handleBoardEvent(client, {
+      roomId: 'room-a',
+      eventType: 'object:update',
+      clientOpId: 'client-op-2',
+      payload: {
+        objectId: 'object-1',
+        patch: {
+          x: 30
+        }
+      }
+    });
+
+    expect(emit).toHaveBeenCalledWith('board:event:rejected', {
+      roomId: 'room-a',
+      eventType: 'object:update',
+      reason: 'VERSION_CONFLICT',
+      message: 'Board version conflict',
+      clientOpId: 'client-op-2',
+      details: {
+        currentVersion: 3,
+        objectId: 'object-1',
+        conflictingFields: ['x']
+      }
     });
   });
 

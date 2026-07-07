@@ -1,8 +1,16 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  Optional
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { decodeBoardEventPayload, encodeBoardEventPayload } from '../board/board-event-payload.codec';
 import type { ApplyBoardEventInput, BoardSnapshot } from '../board/board.service';
 import { BoardService } from '../board/board.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RealtimeRoomEventsService } from '../realtime/realtime-room-events.service';
 import type { CreateVersionTagDto } from './dto/create-version-tag.dto';
 
 const RECENT_EVENT_LIMIT = 50;
@@ -40,11 +48,20 @@ export type VersionDetailResponse = {
   tags: VersionTagResponse[];
 };
 
+export type RestoreVersionResponse = {
+  roomId: string;
+  version: number;
+  restoredFromVersion: number;
+  snapshot: BoardSnapshot;
+};
+
 @Injectable()
 export class VersionHistoryService {
   constructor(
     private readonly boardService: BoardService,
-    private readonly prisma: PrismaService
+    private readonly prisma: PrismaService,
+    @Optional()
+    private readonly roomEvents?: RealtimeRoomEventsService
   ) {}
 
   async listVersions(roomId: string): Promise<VersionHistoryResponse> {
@@ -161,7 +178,7 @@ export class VersionHistoryService {
     roomId: string,
     targetVersion: number,
     actorId: string
-  ): Promise<{ roomId: string; version: number; restoredFromVersion: number }> {
+  ): Promise<RestoreVersionResponse> {
     // Replay events up to targetVersion to reconstruct the snapshot properly
     const events = await this.prisma.boardEvent.findMany({
       where: { roomId, version: { lte: targetVersion } },
@@ -175,11 +192,18 @@ export class VersionHistoryService {
     // Use BoardService.applyEventToSnapshot to properly reconstruct BoardObject entries
     let snapshot: BoardSnapshot = { objects: {} };
     for (const event of events) {
+      const payload = decodeBoardEventPayload(event.eventType, event.payloadJson);
+
+      if (event.eventType === 'history.restore' && this.isRestorePayload(payload)) {
+        snapshot = payload.restoredSnapshot;
+        continue;
+      }
+
       const input: ApplyBoardEventInput = {
         roomId: event.roomId,
         actorId: event.actorId,
         eventType: event.eventType as ApplyBoardEventInput['eventType'],
-        payload: event.payloadJson as ApplyBoardEventInput['payload']
+        payload: payload as ApplyBoardEventInput['payload']
       };
       try {
         snapshot = this.boardService.applyEventToSnapshot(snapshot, input, event.createdAt);
@@ -211,11 +235,11 @@ export class VersionHistoryService {
           roomId,
           version: nextVersion,
           eventType: 'history.restore',
-          payloadJson: {
+          payloadJson: encodeBoardEventPayload('history.restore', {
             fromVersion: currentVersion,
             targetVersion,
             restoredSnapshot: snapshot
-          } as unknown as Prisma.InputJsonValue,
+          }) as unknown as Prisma.InputJsonValue,
           actorId
         }
       });
@@ -231,7 +255,15 @@ export class VersionHistoryService {
       return { version: nextVersion };
     });
 
-    return { roomId, version: result.version, restoredFromVersion: targetVersion };
+    const response = { roomId, version: result.version, restoredFromVersion: targetVersion, snapshot };
+
+    this.roomEvents?.publishSnapshotRestored({
+      ...response,
+      actorId,
+      serverTime: new Date().toISOString()
+    });
+
+    return response;
   }
 
   private async getCurrentVersion(roomId: string): Promise<number> {
@@ -265,10 +297,23 @@ export class VersionHistoryService {
       roomId: event.roomId,
       version: event.version,
       eventType: event.eventType,
-      payload: event.payloadJson,
+      payload: decodeBoardEventPayload(event.eventType, event.payloadJson),
       actorId: event.actorId,
       createdAt: event.createdAt
     };
+  }
+
+  private isRestorePayload(value: unknown): value is {
+    restoredSnapshot: BoardSnapshot;
+  } {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      !Array.isArray(value) &&
+      'restoredSnapshot' in value &&
+      typeof (value as { restoredSnapshot?: unknown }).restoredSnapshot === 'object' &&
+      (value as { restoredSnapshot?: unknown }).restoredSnapshot !== null
+    );
   }
 
   private toVersionTagResponse(tag: {

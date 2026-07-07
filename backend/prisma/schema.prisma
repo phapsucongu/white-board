@@ -24,7 +24,9 @@ model User {
   ownedRooms      Room[]           @relation("RoomOwner")
   memberships     RoomMember[]
   boardEvents     BoardEvent[]
+  comments        Comment[]
   refreshSessions RefreshSession[]
+  textDocuments   TextDocument[]
 }
 
 model RefreshSession {
@@ -52,6 +54,8 @@ model Room {
   members     RoomMember[]
   boardState  BoardState?
   boardEvents BoardEvent[]
+  comments    Comment[]
+  textDocs    TextDocument[]
   versionTags VersionTag[]
 
   @@index([ownerId])
@@ -93,12 +97,14 @@ model BoardEvent {
   eventType   String
   payloadJson Json
   actorId     String
+  clientOpId  String?
   createdAt   DateTime @default(now())
 
   room  Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
   actor User @relation(fields: [actorId], references: [id])
 
   @@unique([roomId, version])
+  @@unique([roomId, clientOpId])
   @@index([roomId])
   @@index([version])
   @@index([actorId])
@@ -116,4 +122,41 @@ model VersionTag {
   @@unique([roomId, version, label])
   @@index([roomId])
   @@index([version])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  roomId    String
+  objectId  String?
+  x         Float?
+  y         Float?
+  body      String
+  resolved  Boolean  @default(false)
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  room   Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([roomId])
+  @@index([objectId])
+  @@index([authorId])
+}
+
+model TextDocument {
+  id         String   @id @default(uuid())
+  roomId     String
+  objectId   String   @unique
+  ydocBase64 String
+  text       String
+  updatedBy  String
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [updatedBy], references: [id])
+
+  @@index([roomId])
+  @@index([updatedBy])
 }

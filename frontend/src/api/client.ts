@@ -49,6 +49,15 @@ export type BoardSnapshotResponse = {
   updatedAt: string | null;
 };
 
+export type RestoreVersionResponse = {
+  roomId: string;
+  version: number;
+  restoredFromVersion: number;
+  snapshot: {
+    objects: Record<BoardObjectId, BoardObject>;
+  };
+};
+
 export type BoardVersionEvent = {
   id: string;
   roomId: string;
@@ -86,6 +95,31 @@ export type RoomMember = {
   role: RoomRole;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CommentSummary = {
+  id: string;
+  roomId: string;
+  objectId: string | null;
+  x: number | null;
+  y: number | null;
+  body: string;
+  resolved: boolean;
+  authorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCommentInput = {
+  objectId?: string;
+  x?: number;
+  y?: number;
+  body: string;
+};
+
+export type UpdateCommentInput = {
+  body?: string;
+  resolved?: boolean;
 };
 
 type RequestOptions = {
@@ -204,7 +238,7 @@ export const apiClient = {
       accessToken
     }),
   restoreVersion: (roomId: string, version: number, accessToken: string) =>
-    apiRequest<{ roomId: string; version: number; restoredFromVersion: number }>(
+    apiRequest<RestoreVersionResponse>(
       `/rooms/${encodeURIComponent(roomId)}/versions/${version}/restore`,
       { method: 'POST', accessToken }
     ),
@@ -233,5 +267,32 @@ export const apiClient = {
     apiRequest<{ success: true }>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, {
       method: 'DELETE',
       accessToken
-    })
+    }),
+  listComments: (roomId: string, accessToken: string) =>
+    apiRequest<CommentSummary[]>(`/rooms/${encodeURIComponent(roomId)}/comments`, {
+      accessToken
+    }),
+  createComment: (roomId: string, input: CreateCommentInput, accessToken: string) =>
+    apiRequest<CommentSummary>(`/rooms/${encodeURIComponent(roomId)}/comments`, {
+      method: 'POST',
+      body: input,
+      accessToken
+    }),
+  updateComment: (roomId: string, commentId: string, input: UpdateCommentInput, accessToken: string) =>
+    apiRequest<CommentSummary>(
+      `/rooms/${encodeURIComponent(roomId)}/comments/${encodeURIComponent(commentId)}`,
+      {
+        method: 'PATCH',
+        body: input,
+        accessToken
+      }
+    ),
+  deleteComment: (roomId: string, commentId: string, accessToken: string) =>
+    apiRequest<{ success: true }>(
+      `/rooms/${encodeURIComponent(roomId)}/comments/${encodeURIComponent(commentId)}`,
+      {
+        method: 'DELETE',
+        accessToken
+      }
+    )
 };

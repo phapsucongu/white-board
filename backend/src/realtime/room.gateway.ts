@@ -26,10 +26,12 @@ import {
   type BoardEventType,
   type BoardSyncResult
 } from '../board/board.service';
+import { CollaborationService, type CursorPosition } from '../collaboration/collaboration.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { PublicUser } from '../users/users.service';
 import { UsersService } from '../users/users.service';
 import { PresenceService, type PresenceUser } from './presence.service';
+import { RealtimeRoomEventsService } from './realtime-room-events.service';
 
 type RoomJoinPayload = {
   roomId?: unknown;
@@ -42,6 +44,26 @@ type BoardEventRequestPayload = {
   payload?: unknown;
   baseVersion?: unknown;
   clientOpId?: unknown;
+};
+
+type CursorUpdatePayload = {
+  roomId?: unknown;
+  position?: unknown;
+};
+
+type SelectionUpdatePayload = {
+  roomId?: unknown;
+  objectIds?: unknown;
+  mode?: unknown;
+};
+
+type TextObjectPayload = {
+  roomId?: unknown;
+  objectId?: unknown;
+};
+
+type TextYjsUpdatePayload = TextObjectPayload & {
+  updateBase64?: unknown;
 };
 
 type AuthenticatedSocketData = {
@@ -70,6 +92,7 @@ type BoardEventAcceptedPayload = {
   payload: ApplyBoardEventInput['payload'];
   actorId: string;
   serverTime: string;
+  clientOpId?: string;
 };
 
 type BoardEventRejectedPayload = {
@@ -77,6 +100,8 @@ type BoardEventRejectedPayload = {
   eventType?: BoardEventType;
   reason: 'UNAUTHORIZED' | 'FORBIDDEN' | 'VALIDATION_ERROR' | 'VERSION_CONFLICT' | 'NOT_FOUND';
   message: string;
+  clientOpId?: string;
+  details?: unknown;
 };
 
 type SocketErrorPayload = {
@@ -112,14 +137,19 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   constructor(
     private readonly boardService: BoardService,
+    private readonly collaboration: CollaborationService,
     private readonly config: ConfigService,
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
     private readonly presence: PresenceService,
+    private readonly roomEvents: RealtimeRoomEventsService,
     private readonly usersService: UsersService
   ) {}
 
   afterInit(server: Server): void {
+    this.collaboration.attachSocketAdapter(server);
+    this.roomEvents.attachServer(server);
+
     server.use(async (client, next) => {
       try {
         const user = await this.authenticateSocket(client as AuthenticatedSocket);
@@ -167,10 +197,228 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   handleDisconnect(client: AuthenticatedSocket): void {
+    const cursor = this.collaboration.removeSocket(client.id);
+    if (cursor) {
+      this.server.to(this.getRoomChannel(cursor.roomId)).emit('cursor:remove', {
+        roomId: cursor.roomId,
+        userId: cursor.userId,
+        socketId: cursor.socketId
+      });
+    }
+
+    const selection = this.collaboration.removeObjectSelection(client.id);
+    if (selection) {
+      this.server.to(this.getRoomChannel(selection.roomId)).emit('selection:remove', {
+        roomId: selection.roomId,
+        userId: selection.userId,
+        socketId: selection.socketId
+      });
+    }
+
+    for (const lease of this.collaboration.removeTextLeasesForSocket(client.id)) {
+      this.server.to(this.getRoomChannel(lease.roomId)).emit('text:lease:update', {
+        roomId: lease.roomId,
+        objectId: lease.objectId,
+        lease: null
+      });
+    }
+
     const updates = this.presence.removeSocket(client.id);
 
     for (const update of updates) {
       this.emitPresenceUpdate(update.roomId, update.users);
+    }
+  }
+
+  @SubscribeMessage('selection:update')
+  async handleSelectionUpdate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: SelectionUpdatePayload
+  ): Promise<void> {
+    const user = client.data.user;
+    const roomId = this.parseRoomId(payload);
+    const objectIds = this.parseObjectIds(payload.objectIds);
+    const mode = this.parseSelectionMode(payload.mode);
+
+    if (!user || !roomId || !mode) {
+      return;
+    }
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) {
+      return;
+    }
+
+    if (objectIds.length === 0) {
+      const removed = this.collaboration.removeObjectSelection(client.id);
+      client.to(this.getRoomChannel(roomId)).emit('selection:remove', {
+        roomId,
+        userId: removed?.userId ?? user.id,
+        socketId: client.id
+      });
+      return;
+    }
+
+    const selection = this.collaboration.recordObjectSelection({
+      roomId,
+      userId: user.id,
+      displayName: user.displayName,
+      socketId: client.id,
+      objectIds,
+      mode
+    });
+
+    client.to(this.getRoomChannel(roomId)).emit('selection:broadcast', selection);
+  }
+
+  @SubscribeMessage('cursor:update')
+  async handleCursorUpdate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: CursorUpdatePayload
+  ): Promise<void> {
+    const user = client.data.user;
+    const roomId = this.parseRoomId(payload);
+    const position = this.parseCursorPosition(payload.position);
+
+    if (!user || !roomId || !position) {
+      return;
+    }
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) {
+      return;
+    }
+
+    const cursor = this.collaboration.recordCursor({
+      roomId,
+      userId: user.id,
+      displayName: user.displayName,
+      socketId: client.id,
+      position
+    });
+
+    client.to(this.getRoomChannel(roomId)).emit('cursor:broadcast', cursor);
+  }
+
+  @SubscribeMessage('text:lease:claim')
+  async handleTextLeaseClaim(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: TextObjectPayload
+  ): Promise<void> {
+    const user = client.data.user;
+    const roomId = this.parseRoomId(payload);
+    const objectId = this.parseObjectId(payload.objectId);
+
+    if (!user || !roomId || !objectId) {
+      return;
+    }
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership || !this.canMutateBoard(membership.role)) {
+      return;
+    }
+
+    const result = this.collaboration.claimTextLease({
+      roomId,
+      objectId,
+      userId: user.id,
+      displayName: user.displayName,
+      socketId: client.id
+    });
+
+    if (!result.acquired) {
+      client.emit('text:lease:denied', {
+        roomId,
+        objectId,
+        lease: result.lease,
+        message: `${result.lease.displayName || result.lease.userId} is editing this text`
+      });
+      client.emit('text:lease:update', result.lease);
+      return;
+    }
+
+    this.server.to(this.getRoomChannel(roomId)).emit('text:lease:update', result.lease);
+  }
+
+  @SubscribeMessage('text:lease:release')
+  async handleTextLeaseRelease(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: TextObjectPayload
+  ): Promise<void> {
+    const user = client.data.user;
+    const roomId = this.parseRoomId(payload);
+    const objectId = this.parseObjectId(payload.objectId);
+
+    if (!user || !roomId || !objectId) {
+      return;
+    }
+
+    const lease = this.collaboration.releaseTextLease(roomId, objectId, user.id);
+    this.server.to(this.getRoomChannel(roomId)).emit('text:lease:update', {
+      roomId,
+      objectId,
+      lease
+    });
+  }
+
+  @SubscribeMessage('text:yjs:update')
+  async handleTextYjsUpdate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: TextYjsUpdatePayload
+  ): Promise<void> {
+    const user = client.data.user;
+    const roomId = this.parseRoomId(payload);
+    const objectId = this.parseObjectId(payload.objectId);
+    const updateBase64 = typeof payload.updateBase64 === 'string' ? payload.updateBase64 : null;
+
+    if (!user || !roomId || !objectId || !updateBase64) {
+      return;
+    }
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership || !this.canMutateBoard(membership.role)) {
+      return;
+    }
+
+    try {
+      const result = await this.collaboration.applyTextUpdate({
+        roomId,
+        objectId,
+        actorId: user.id,
+        updateBase64
+      });
+      const serverTime = new Date().toISOString();
+      const textPayload = {
+        roomId,
+        objectId,
+        actorId: user.id,
+        updateBase64,
+        stateBase64: result.stateBase64,
+        text: result.text,
+        serverTime
+      };
+      const boardPayload: BoardEventAcceptedPayload = {
+        roomId: result.boardEvent.roomId,
+        version: result.boardEvent.version,
+        eventType: result.boardEvent.eventType,
+        payload: result.boardEvent.payload,
+        actorId: result.boardEvent.actorId,
+        serverTime,
+        ...(result.boardEvent.clientOpId ? { clientOpId: result.boardEvent.clientOpId } : {})
+      };
+
+      client.emit('text:yjs:accepted', textPayload);
+      client.to(this.getRoomChannel(roomId)).emit('text:yjs:broadcast', textPayload);
+      client.emit('board:event:accepted', boardPayload);
+      client.to(this.getRoomChannel(roomId)).emit('board:event:broadcast', boardPayload);
+    } catch (error) {
+      this.emitBoardEventRejected(client, {
+        roomId,
+        eventType: 'object:update',
+        reason: this.getBoardEventRejectionReason(error),
+        message: this.getHttpExceptionMessage(error, 'Text update rejected'),
+        ...(this.getHttpExceptionDetails(error) ? { details: this.getHttpExceptionDetails(error) } : {})
+      });
     }
   }
 
@@ -248,13 +496,15 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const user = client.data.user;
     const roomId = this.parseRoomId(payload);
     const eventType = this.parseBoardEventType(payload);
+    const clientOpId = this.parseClientOpId(payload.clientOpId);
 
     if (!user) {
       this.emitBoardEventRejected(client, {
         roomId: roomId ?? undefined,
         eventType: eventType ?? undefined,
         reason: 'UNAUTHORIZED',
-        message: 'Authentication required'
+        message: 'Authentication required',
+        ...(clientOpId ? { clientOpId } : {})
       });
       return;
     }
@@ -264,7 +514,8 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         roomId: roomId ?? undefined,
         eventType: eventType ?? undefined,
         reason: 'VALIDATION_ERROR',
-        message: 'roomId and supported eventType are required'
+        message: 'roomId and supported eventType are required',
+        ...(clientOpId ? { clientOpId } : {})
       });
       return;
     }
@@ -276,7 +527,8 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         roomId,
         eventType,
         reason: 'FORBIDDEN',
-        message: 'Room membership required'
+        message: 'Room membership required',
+        ...(clientOpId ? { clientOpId } : {})
       });
       return;
     }
@@ -286,27 +538,34 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         roomId,
         eventType,
         reason: 'FORBIDDEN',
-        message: 'Editor role is required'
+        message: 'Editor role is required',
+        ...(clientOpId ? { clientOpId } : {})
       });
       return;
     }
 
     try {
-      const result = await this.boardService.applyBoardEvent({
+      const eventInput: ApplyBoardEventInput = {
         roomId,
         actorId: user.id,
         eventType,
         payload: payload.payload as ApplyBoardEventInput['payload'],
-        baseVersion: this.parseBaseVersion(payload.baseVersion),
-        clientOpId: typeof payload.clientOpId === 'string' ? payload.clientOpId : undefined
-      });
+        baseVersion: this.parseBaseVersion(payload.baseVersion)
+      };
+
+      if (clientOpId) {
+        eventInput.clientOpId = clientOpId;
+      }
+
+      const result = await this.boardService.applyBoardEvent(eventInput);
       const acceptedPayload: BoardEventAcceptedPayload = {
         roomId: result.roomId,
         version: result.version,
         eventType: result.eventType,
         payload: result.payload,
         actorId: result.actorId,
-        serverTime: new Date().toISOString()
+        serverTime: new Date().toISOString(),
+        ...(result.clientOpId ? { clientOpId: result.clientOpId } : {})
       };
 
       client.emit('board:event:accepted', acceptedPayload);
@@ -314,11 +573,15 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
       return acceptedPayload;
     } catch (error) {
+      const details = this.getHttpExceptionDetails(error);
+
       this.emitBoardEventRejected(client, {
         roomId,
         eventType,
         reason: this.getBoardEventRejectionReason(error),
-        message: error instanceof HttpException ? error.message : 'Board event rejected'
+        message: this.getHttpExceptionMessage(error, 'Board event rejected'),
+        ...(clientOpId ? { clientOpId } : {}),
+        ...(details ? { details } : {})
       });
     }
   }
@@ -367,7 +630,7 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     code: SocketErrorPayload['code'],
     message: string
   ): void {
-    client.emit('error', {
+    client.emit('room:error', {
       code,
       message
     } satisfies SocketErrorPayload);
@@ -437,6 +700,40 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       : null;
   }
 
+  private parseClientOpId(clientOpId: unknown): string | undefined {
+    return typeof clientOpId === 'string' && clientOpId.trim() ? clientOpId.trim() : undefined;
+  }
+
+  private parseObjectId(objectId: unknown): string | null {
+    return typeof objectId === 'string' && objectId.trim() ? objectId.trim() : null;
+  }
+
+  private parseCursorPosition(position: unknown): CursorPosition | null {
+    if (typeof position !== 'object' || position === null) {
+      return null;
+    }
+
+    const candidate = position as Record<string, unknown>;
+    return typeof candidate.x === 'number' && typeof candidate.y === 'number'
+      ? { x: candidate.x, y: candidate.y }
+      : null;
+  }
+
+  private parseObjectIds(objectIds: unknown): string[] {
+    if (!Array.isArray(objectIds)) {
+      return [];
+    }
+
+    return objectIds
+      .filter((objectId): objectId is string => typeof objectId === 'string' && Boolean(objectId.trim()))
+      .map((objectId) => objectId.trim())
+      .slice(0, 100);
+  }
+
+  private parseSelectionMode(mode: unknown): 'selected' | 'editing' | null {
+    return mode === 'selected' || mode === 'editing' ? mode : null;
+  }
+
   private parseBaseVersion(baseVersion: unknown): number | undefined {
     if (baseVersion === undefined) {
       return undefined;
@@ -475,6 +772,46 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
 
     return 'VALIDATION_ERROR';
+  }
+
+  private getHttpExceptionMessage(error: unknown, fallback: string): string {
+    if (!(error instanceof HttpException)) {
+      return fallback;
+    }
+
+    const response = error.getResponse();
+
+    if (typeof response === 'string') {
+      return response;
+    }
+
+    if (typeof response === 'object' && response !== null && 'message' in response) {
+      const message = (response as { message?: unknown }).message;
+
+      if (typeof message === 'string') {
+        return message;
+      }
+
+      if (Array.isArray(message)) {
+        return message.join(', ');
+      }
+    }
+
+    return error.message;
+  }
+
+  private getHttpExceptionDetails(error: unknown): unknown {
+    if (!(error instanceof HttpException)) {
+      return undefined;
+    }
+
+    const response = error.getResponse();
+
+    if (typeof response === 'object' && response !== null && 'details' in response) {
+      return (response as { details?: unknown }).details;
+    }
+
+    return undefined;
   }
 
   private getRoomChannel(roomId: string): string {
