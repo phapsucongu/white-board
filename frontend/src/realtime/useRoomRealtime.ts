@@ -269,12 +269,14 @@ export function useRoomRealtime({
   accessToken,
   currentUserId,
   enabled,
-  roomId
+  roomId,
+  onCommentReceived
 }: {
   accessToken: string | null;
   currentUserId: string | null;
   enabled: boolean;
   roomId: string | null;
+  onCommentReceived?: (comment: { id: string; body: string; x?: number | null; y?: number | null; objectId?: string | null; authorId: string; createdAt: string }) => void;
 }) {
   const socketRef = useRef<Socket | null>(null);
   const optimisticCreatesRef = useRef<Map<string, BoardObjectId>>(new Map());
@@ -537,6 +539,11 @@ export function useRoomRealtime({
     socket.on('connect_error', (socketError) => {
       setError(socketError.message);
       setStatus('error');
+    });
+
+    socket.on('comment:new', (payload: { roomId: string; comment: { id: string; body: string; x?: number | null; y?: number | null; objectId?: string | null; authorId: string; createdAt: string } }) => {
+      if (payload.roomId !== roomId) return;
+      onCommentReceived?.(payload.comment);
     });
 
     socket.on('shape:preview', (payload: ShapePreview) => {
@@ -978,6 +985,14 @@ export function useRoomRealtime({
     sendRectangleCreate,
     sendTextCreate,
     sendTextEdit,
+    sendCommentCreated: useCallback(
+      (comment: { id: string; body: string; x?: number | null; y?: number | null; objectId?: string | null; authorId: string; createdAt: string }) => {
+        const socket = socketRef.current;
+        if (!socket || !roomId) return;
+        socket.emit('comment:new', { roomId, comment });
+      },
+      [roomId]
+    ),
     status,
     textLeases,
     undo

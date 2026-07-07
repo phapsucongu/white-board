@@ -44,12 +44,10 @@ export function RoomPage() {
   });
   const [showPresence, setShowPresence] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
-  const [showComments, setShowComments] = useState(false);
+  const [showComments, setShowComments] = useState(true);
   const [comments, setComments] = useState<CommentSummary[]>([]);
   const [commentBody, setCommentBody] = useState('');
-  const [commentTarget, setCommentTarget] = useState<{ objectId?: string; x?: number; y?: number } | null>(null);
   const setBoardSnapshot = useBoardStore((state) => state.setBoardSnapshot);
-  const boardObjects = useBoardStore((state) => state.objects);
   const selectedObjectIds = useBoardStore((state) => state.selectedObjectIds);
   const activeRoom = roomState.status === 'ready' ? roomState.room : null;
   const canDrawRectangle = canMutateRoom(activeRoom?.role);
@@ -60,7 +58,13 @@ export function RoomPage() {
     accessToken,
     currentUserId: user?.id ?? null,
     enabled: Boolean(activeRoom),
-    roomId: activeRoom?.id ?? null
+    roomId: activeRoom?.id ?? null,
+    onCommentReceived: useCallback((comment: { id: string; body: string; authorId: string; createdAt: string }) => {
+      setComments((current) => {
+        if (current.some((c) => c.id === comment.id)) return current;
+        return [...current, comment as CommentSummary];
+      });
+    }, [])
   });
 
   useEffect(() => {
@@ -141,7 +145,7 @@ export function RoomPage() {
         toastService.error(error instanceof Error ? error.message : 'Unable to load comments');
       });
   }, [activeRoom, runWithAuth]);
-
+  
   useEffect(() => {
     void loadComments();
   }, [loadComments]);
@@ -224,24 +228,23 @@ export function RoomPage() {
   const handleCreateComment = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (!activeRoom || !commentTarget) return;
+      if (!activeRoom) return;
       const body = commentBody.trim();
       if (!body) return;
 
       runWithAuth((accessToken) =>
-        apiClient.createComment(activeRoom.id, { ...commentTarget, body }, accessToken)
+        apiClient.createComment(activeRoom.id, { body }, accessToken)
       )
         .then((comment) => {
           setComments((current) => [...current, comment]);
           setCommentBody('');
-          setCommentTarget(null);
           toastService.success('Comment added');
         })
         .catch((error: unknown) => {
           toastService.error(error instanceof Error ? error.message : 'Unable to create comment');
         });
     },
-    [activeRoom, commentBody, commentTarget, runWithAuth]
+    [activeRoom, commentBody, runWithAuth, realtime.sendCommentCreated]
   );
 
   const handleResolveComment = useCallback(
@@ -259,15 +262,6 @@ export function RoomPage() {
     },
     [activeRoom, runWithAuth]
   );
-
-  const commentPins = comments.flatMap((comment) => {
-    if (typeof comment.x === 'number' && typeof comment.y === 'number') {
-      return [{ id: comment.id, x: comment.x, y: comment.y, resolved: comment.resolved }];
-    }
-
-    const object = comment.objectId ? boardObjects[comment.objectId] : null;
-    return object ? [{ id: comment.id, x: object.x, y: object.y, resolved: comment.resolved }] : [];
-  });
 
   return (
     <div className="h-[calc(100vh-48px)] flex flex-col bg-canvas-bg">
@@ -391,15 +385,8 @@ export function RoomPage() {
             canEditObjects={canDrawRectangle}
             canRedo={canDrawRectangle && realtime.canRedo}
             canUndo={canDrawRectangle && realtime.canUndo}
-            commentPins={commentPins}
             currentUserId={user?.id ?? 'local-user'}
-            liveCursors={realtime.liveCursors}
             onCircleCommit={realtime.sendCircleCreate}
-            onCanvasCommentPoint={(point) => {
-              setCommentTarget({ x: point.x, y: point.y });
-              setShowComments(true);
-            }}
-            onCursorMove={realtime.sendCursorUpdate}
             onLineCommit={realtime.sendLineCreate}
             onObjectEditStart={(objectId) => realtime.sendSelectionUpdate([objectId], 'editing')}
             onObjectEditStop={() => realtime.sendSelectionUpdate([...selectedObjectIds], 'selected')}
@@ -439,50 +426,25 @@ export function RoomPage() {
           <aside className="absolute left-[72px] bottom-20 w-[320px] glass-panel rounded-xl flex flex-col shadow-lg z-30 overflow-hidden border border-white/5 bg-surface">
             <div className="p-4 border-b border-white/5">
               <SectionHeading
-                title="Comments"
-                subtitle={`${comments.filter((comment) => !comment.resolved).length} open`}
-                action={
-                  selectedObjectIds.size > 0 ? (
-                    <button
-                      className="text-label-code text-primary hover:text-primary-fixed"
-                      type="button"
-                      onClick={() => {
-                        const [objectId] = [...selectedObjectIds];
-                        setCommentTarget({ objectId });
-                      }}
-                    >
-                      Comment selected
-                    </button>
-                  ) : undefined
-                }
+                title="Room Comments"
+                subtitle={`${comments.filter((c) => !c.resolved).length} open`}
               />
             </div>
-            {commentTarget && (
-              <form onSubmit={handleCreateComment} className="p-3 border-b border-white/5">
-                <textarea
-                  className="w-full min-h-20 bg-surface-container-highest border border-stroke-default rounded px-3 py-2 text-body-sm text-on-surface placeholder:text-outline focus:outline-none focus:border-primary"
-                  placeholder="Add annotation..."
-                  value={commentBody}
-                  onChange={(event) => setCommentBody(event.target.value)}
-                />
-                <div className="flex justify-end gap-2 mt-2">
-                  <button
-                    className="px-3 py-1.5 text-body-sm text-on-surface-variant"
-                    type="button"
-                    onClick={() => { setCommentTarget(null); setCommentBody(''); }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="px-3 py-1.5 bg-primary text-on-primary rounded text-label-code disabled:opacity-50"
-                    disabled={!commentBody.trim()}
-                    type="submit"
-                  >
-                    Add
-                  </button>
-                </div>
-              </form>
-            )}
+            <form onSubmit={handleCreateComment} className="p-3 border-b border-white/5 flex gap-2">
+              <input
+                className="flex-1 bg-surface-container-highest border border-stroke-default rounded px-3 py-2 text-body-sm text-on-surface placeholder:text-outline focus:outline-none focus:border-primary"
+                placeholder="Type a comment..."
+                value={commentBody}
+                onChange={(e) => setCommentBody(e.target.value)}
+              />
+              <button
+                className="px-3 py-2 bg-primary text-on-primary rounded text-label-code disabled:opacity-50 shrink-0"
+                disabled={!commentBody.trim()}
+                type="submit"
+              >
+                Send
+              </button>
+            </form>
             <ul className="max-h-[260px] overflow-y-auto custom-scrollbar p-2 space-y-2">
               {comments.length === 0 && (
                 <li className="text-body-sm text-on-surface-variant p-2">No comments yet.</li>
@@ -494,7 +456,7 @@ export function RoomPage() {
                 >
                   <p className="text-on-surface mb-2">{comment.body}</p>
                   <div className="flex items-center justify-between text-label-code text-on-surface-variant">
-                    <span>{comment.objectId ? 'Object annotation' : 'Canvas annotation'}</span>
+                    <span>{comment.authorId.slice(0, 8)}</span>
                     <button
                       className="text-primary hover:text-primary-fixed"
                       type="button"

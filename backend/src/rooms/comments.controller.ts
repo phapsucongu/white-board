@@ -3,6 +3,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { AuthenticatedRequest } from '../auth/types';
 import { RoomMemberGuard } from '../permissions/room-member.guard';
 import { RoomRole } from '../permissions/room-role.enum';
+import { RoomGateway } from '../realtime/room.gateway';
 import { CommentsService } from './comments.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { UpdateCommentDto } from './dto/update-comment.dto';
@@ -16,7 +17,10 @@ type RoomRequest = AuthenticatedRequest & {
 @Controller('rooms/:roomId/comments')
 @UseGuards(JwtAuthGuard, RoomMemberGuard)
 export class CommentsController {
-  constructor(private readonly comments: CommentsService) {}
+  constructor(
+    private readonly comments: CommentsService,
+    private readonly gateway: RoomGateway
+  ) {}
 
   @Get()
   list(@Param('roomId') roomId: string) {
@@ -24,12 +28,15 @@ export class CommentsController {
   }
 
   @Post()
-  create(
+  async create(
     @Req() request: AuthenticatedRequest,
     @Param('roomId') roomId: string,
     @Body() dto: CreateCommentDto
   ) {
-    return this.comments.create(roomId, request.user.id, dto);
+    const comment = await this.comments.create(roomId, request.user.id, dto);
+    // Broadcast to all clients in the room
+    this.gateway.broadcastToRoom(roomId, 'comment:new', { roomId, comment });
+    return comment;
   }
 
   @Patch(':commentId')

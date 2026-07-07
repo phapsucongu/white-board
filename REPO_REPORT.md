@@ -311,18 +311,19 @@ sequenceDiagram
 sequenceDiagram
   participant User
   participant Canvas as BoardCanvas
-  participant Window as window (mousemove/mouseup)
+  participant Win as window handlers
   participant Store as Zustand Store
 
   User->>Canvas: mousedown on empty area (select tool)
-  Canvas->>Canvas: selDragRef.active = true, setSelStart
-  User->>Window: drag mouse
-  Window->>Canvas: mousemove → update selection rect
-  Canvas->>Canvas: render rubber-band rect
-  User->>Window: mouseup
-  Window->>Canvas: compute selection rect bounds
-  Canvas->>Store: setState({ selectedObjectIds: intersected })
-  Store-->>Canvas: re-render with multi-selection boxes
+  Canvas->>Canvas: selDragRef.active = true
+  User->>Win: drag mouse across canvas
+  Win->>Canvas: mousemove updates selection rect
+  Canvas->>Canvas: render rubber-band preview
+  User->>Win: mouseup ends drag
+  Win->>Canvas: compute selection rect bounds
+  Canvas->>Store: setSelectedObjectIds(intersected)
+  Store-->>Canvas: re-render with selection boxes
+```
 
 ### 4.5 Sơ đồ module Quản lý Phiên bản và Restore
 
@@ -347,6 +348,40 @@ flowchart LR
   C --> H
   H --> E
   H --> G
+```
+
+### 4.5b Sơ đồ luồng Restore Version
+
+```mermaid
+sequenceDiagram
+  participant Owner
+  participant RoomPage
+  participant API as VersionHistoryController
+  participant Svc as VersionHistoryService
+  participant Board as BoardService
+  participant DB
+
+  Owner->>RoomPage: Click "Restore" on v15
+  RoomPage->>API: POST /rooms/:id/versions/15/restore
+  API->>Svc: restoreVersion(roomId, 15, actorId)
+  Svc->>DB: SELECT events WHERE version <= 15
+  Svc->>Svc: replay events → rebuild snapshot
+  loop for each event 1..15
+    Svc->>Board: applyEventToSnapshot(snapshot, event)
+    Board-->>Svc: updated snapshot
+  end
+  Svc->>DB: BEGIN transaction
+  Svc->>DB: read current boardState.version
+  Svc->>DB: INSERT BoardEvent (history.restore, version=N+1)
+  Svc->>DB: UPDATE BoardState (snapshot restored, version=N+1)
+  Svc->>DB: COMMIT
+  Svc-->>API: { version: N+1, restoredFromVersion: 15 }
+  API-->>RoomPage: restore result
+  RoomPage->>API: GET /rooms/:id/board (reload snapshot)
+  API-->>RoomPage: new board snapshot
+  RoomPage->>RoomPage: setBoardSnapshot → update Zustand store
+  RoomPage->>RoomPage: reloadVersionHistory
+  Note over RoomPage: Undo/redo stacks preserved<br/>User can still undo pre-restore ops
 ```
 
 ### 4.6 Sơ đồ module Presence và Realtime Collaboration
@@ -544,9 +579,10 @@ Mỗi object gồm:
 |---|---|
 | `AuthModule` | Đăng ký, đăng nhập, refresh token, logout, tạo JWT |
 | `UsersModule` | Tra cứu user và chuyển sang public user projection |
-| `RoomsModule` | CRUD room, quản lý member, invite code, version history |
-| `BoardModule` | Xử lý event sourcing board, apply event, sync delta/snapshot |
+| `RoomsModule` | CRUD room, quản lý member, invite code, version history, comments API |
+| `BoardModule` | Xử lý event sourcing board, apply event, sync delta/snapshot, conflict resolution |
 | `RealtimeModule` | Socket.IO gateway, presence, room join, broadcast board events |
+| `CollaborationModule` | Multi-cursor, live selection, text lease (soft lock TTL), Yjs sync (Redis adapter optional) |
 | `PermissionsModule` | Guards và decorators kiểm tra role phòng |
 | `PrismaModule` | Service Prisma singleton |
 
@@ -554,13 +590,15 @@ Mỗi object gồm:
 
 | Module | Vai trò |
 |---|---|
-| `auth/` | AuthContext, token storage, auto refresh session |
-| `api/` | Client gọi REST API với error handling và auth header |
-| `board/` | Zustand store, canvas helpers, shape generation |
-| `realtime/` | Hook `useRoomRealtime`, quản lý Socket.IO, undo/redo queue |
-| `pages/` | DashboardPage, RoomPage, auth pages |
-| `components/` | MemberManagement, ObjectDetailPanel, UI primitives |
-| `versions/` | Hiển thị version history và tag |
+| `auth/` | AuthContext, token storage, auto refresh session, `runWithAuth` retry wrapper |
+| `api/` | Typed REST client (`ApiClient`) — auth, rooms, members, comments, version history, invite code |
+| `board/` | Zustand store (`useBoardStore`), BoardCanvas (Konva Stage + Transformer + shape rendering), shape creation helpers cho rectangle/circle/line/text |
+| `realtime/` | Hook `useRoomRealtime` — Socket.IO lifecycle, undo/redo queue (FIFO `pendingHistoryRef`), presence, delta/snapshot sync, `offlineOutbox` (IndexedDB queue cho offline operations) |
+| `pages/` | DashboardPage (room cards + invite code + delete), RoomPage (canvas + panels + comments), LoginPage, RegisterPage |
+| `components/board/` | `MemberManagement` (owner chỉnh role/xóa), `ObjectDetailPanel` (thông tin object khi chọn) |
+| `components/ui/` | GlassPanel, PageHeading, StatusChip, RoleBadge, ToolButton, SectionHeading, Toaster |
+| `components/layout/` | AppHeader (navbar với glassmorphism), MobileNav (bottom bar mobile) |
+| `versions/` | `formatVersionEventType`, `getVersionActorLabel`, `getTagsForVersion`, `canCreateVersionTag` |
 
 ---
 
@@ -703,11 +741,20 @@ Khi client mất kết nối rồi reconnect:
 ### 8.5 Luồng undo/redo
 
 Undo/redo được triển khai chủ yếu ở frontend:
-- Mỗi thao tác board tạo một `BoardHistoryEntry` có `undo` và `redo` operation.
-- Khi server chấp nhận event, frontend cập nhật stack undo/redo.
-- Undo/redo không phụ thuộc vào server history logic; server chỉ validate version.
+- Mỗi thao tác board tạo một `BoardHistoryEntry` có `undo` (inverse operation) và `redo` (original operation).
+- **Create → undo=delete**: Xóa object vừa tạo. Undo luôn gửi `object:delete` **không kèm expectedVersion** để tránh conflict sau nhiều thao tác trung gian.
+- **Update → undo=update (restore previous state)**: Gửi `object:update` với patch khôi phục giá trị cũ. ExpectedVersion bị xóa khỏi undo payload.
+- **Delete → undo=create**: Tạo lại object từ bản sao trước khi xóa.
+- Khi server ACK event, frontend gọi `completePendingHistory` để chuyển entry từ `undoStack` ↔ `redoStack`.
+- `pendingHistoryCount > 0` sẽ chặn undo/redo cho đến khi pending operation hoàn thành.
+- Undo/redo stack **không bị clear sau restore** — user có thể undo các thao tác trước khi restore.
+- Keyboard shortcuts: `Ctrl+Z` (undo), `Ctrl+Shift+Z` / `Ctrl+Y` (redo).
 
-Điều này làm cho UX mượt nhưng có nhược điểm là logic phụ thuộc vào thứ tự ack và queue pending history.
+### 8.6 Luồng xóa room
+
+- Owner chọn "Delete Room" trên Dashboard card → hiện confirmation dialog.
+- Xác nhận → `DELETE /rooms/:roomId` → room và tất cả dữ liệu liên quan (members, board state, events, comments) bị xóa cascade.
+- Room bị xóa khỏi danh sách hiển thị và toast notification hiện thông báo thành công.
 
 ---
 
@@ -750,6 +797,10 @@ Các endpoint REST chính đang có:
 | `POST` | `/rooms/:roomId/versions/tags` | Tạo checkpoint tag | EDITOR trở lên |
 | `GET` | `/rooms/:roomId/versions/:version` | Chi tiết một version | Member |
 | `POST` | `/rooms/:roomId/versions/:version/restore` | Restore board về version cũ | OWNER |
+| `GET` | `/rooms/:roomId/comments` | Danh sách comment trong room | Member |
+| `POST` | `/rooms/:roomId/comments` | Tạo comment (có thể gắn vào objectId hoặc x/y) | Member |
+| `PATCH` | `/rooms/:roomId/comments/:commentId` | Sửa body/resolved của comment | Author hoặc OWNER |
+| `DELETE` | `/rooms/:roomId/comments/:commentId` | Xóa comment | Author hoặc OWNER |
 
 ### 9.2 Frontend ↔ Backend Socket.IO
 
@@ -774,7 +825,14 @@ Luồng Socket.IO thực tế:
 | `board:event:accepted` | Server -> Sender | Event đã được ghi, kèm version mới |
 | `board:event:broadcast` | Server -> Other clients | Event đã được ghi để các client khác apply |
 | `board:event:rejected` | Server -> Sender | Lý do reject: unauthorized, forbidden, validation, conflict, not found |
-| `shape:preview` | Client -> Server -> Room | Preview transform tạm thời, không ghi DB |
+| `shape:preview` | Client -> Server -> Room | Preview transform tạm thời, không ghi DB (cần membership check) |
+| `cursor:update` | Client -> Server | `{ roomId, position }` — vị trí chuột, broadcast qua CollaborationService |
+| `selection:update` | Client -> Server | `{ roomId, objectIds, mode }` — object đang được chọn |
+| `text:lease:claim` | Client -> Server | Xin lease để edit text object (TTL 30s, renew 10s) |
+| `text:lease:release` | Client -> Server | Giải phóng lease khi edit xong |
+| `text:lease:update` | Server -> Room | Thông báo lease state mới cho tất cả client |
+| `text:lease:denied` | Server -> Sender | Lease bị từ chối (người khác đang giữ) |
+| `board:snapshot:restored` | Server -> Room | Phát khi có restore, client reload snapshot |
 
 ### 9.3 Backend internal module flow
 
@@ -847,10 +905,27 @@ Các event type board hiện được hỗ trợ:
 - version history panel và tag creation
 
 ### 11.3 UX patterns
-- toolbar chọn công cụ
-- rubber-band selection
-- zoom/ pan bằng chuột và phím tắt
-- keyboard shortcuts: Ctrl+Z/Ctrl+Y, Delete, Ctrl+0
+- **Toolbar nổi** bên trái canvas: Select, Rectangle, Circle, Line, Text, Pan
+- **Rubber-band selection**: Kéo chuột trên vùng trống (select mode) để chọn nhiều object
+- **Shift+Click**: Toggle từng object vào/tắt multi-select
+- **Transformer**: Resize/rotate object khi chọn, hiện 8 anchor handles
+- **Object Detail Panel**: Hiện bên phải khi chọn đúng 1 object, hiển thị: ID, type, x/y, rotation, width/height/radius, fill, stroke, strokeWidth, version, creator, updatedAt, nút Delete
+- **Toast notifications**: Góc phải dưới, 4 loại (success xanh, error đỏ, warning cam, info xanh dương), tự động biến mất sau 4 giây
+
+### 11.4 Keyboard shortcuts đầy đủ
+
+| Phím | Chức năng | Context |
+|---|---|---|
+| `Ctrl+Z` | Undo | Canvas |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo | Canvas |
+| `Ctrl+=` | Zoom in | Canvas |
+| `Ctrl+-` | Zoom out | Canvas |
+| `Ctrl+0` | Reset zoom 100% | Canvas |
+| `Delete` / `Backspace` | Xóa object đang chọn | Canvas |
+| `Escape` | Bỏ chọn + về Select tool | Canvas |
+| `Shift+Click` | Toggle multi-select | Canvas |
+| `Enter` | Submit text input | Text mode |
+| Kéo chuột vùng trống | Rubber-band select | Select mode |
 
 ---
 
@@ -868,11 +943,37 @@ Các event type board hiện được hỗ trợ:
 - Redis: `6379` (declared but not yet used in core flow)
 
 ### Environment variables
-- `DATABASE_URL`
-- `JWT_ACCESS_SECRET`
-- `JWT_ACCESS_TTL`
-- `REFRESH_TOKEN_TTL_DAYS`
-- `CORS_ORIGIN`
+- `DATABASE_URL` — PostgreSQL connection string
+- `JWT_ACCESS_SECRET` — Secret key cho JWT signing
+- `JWT_ACCESS_TTL` — Thời hạn access token (mặc định `15m`)
+- `REFRESH_TOKEN_TTL_DAYS` — Thời hạn refresh token (mặc định `30`)
+- `CORS_ORIGIN` — CORS allowlist (mặc định `http://localhost:5173`)
+- `BACKEND_PORT` — Backend port (mặc định `3000`)
+- `FRONTEND_PORT` — Frontend dev server port (mặc định `5173`)
+
+### Docker deployment
+
+Backend có thể được build và chạy trong Docker:
+
+```bash
+# Build và chạy toàn bộ stack
+docker compose -f docker-compose.yml up -d --build
+
+# Chỉ chạy PostgreSQL
+docker compose up -d postgres
+```
+
+**Dockerfile** (backend): Single-stage build với Node 22 Alpine:
+1. Copy workspace config + lockfile → `pnpm install`
+2. Copy source + Prisma schema → `prisma generate` + `nest build`
+3. Runtime: `prisma db push --accept-data-loss && node dist/main.js`
+
+**docker-compose.yml services**:
+- `postgres`: PostgreSQL 16 Alpine, port 5432
+- `backend`: Build từ Dockerfile, port 3000, depends_on postgres (healthcheck)
+- `redis`: Redis 7 Alpine, port 6379 (optional, cho Socket.IO adapter)
+
+Lưu ý: Nếu backend local đang chạy trên port 3000, Docker container sẽ không thể bind port 3000. Tắt backend local trước khi `docker compose up`.
 
 ---
 
@@ -918,21 +1019,28 @@ Repository có test cho nhiều layer:
 
 ## 15. Trạng thái các giới hạn đã rà soát
 
-Các giới hạn lớn được rà soát gần đây đã được xử lý ở mức implementation hiện tại:
+### Đã xử lý
 
-- Undo/redo ACK/reject đã match bằng `clientOpId`, không còn phụ thuộc FIFO đơn giản.
-- `SocketEventName` trong shared package đã được đồng bộ với gateway/client.
-- Socket.IO client đã dùng fallback mặc định của Socket.IO thay vì WebSocket-only.
-- Board creation đã có optimistic update và reconcile/rollback theo `clientOpId`.
-- Board event payload mới đã có schema envelope versioned; legacy raw payload vẫn được hỗ trợ khi đọc/replay.
-- Restore version đã phát `board:snapshot:restored`; client đang ở trong room không cần reload để thấy snapshot mới.
+- **Undo/redo expectedVersion**: Đã bỏ expectedVersion khỏi undo payload → undo luôn thành công. Undo stack không bị clear sau restore.
+- **Type guard `isCreateBoardObjectPayload`**: Đã fix chấp nhận cả 4 loại shape (rectangle, circle, line, text).
+- **Multi-select**: Rubber-band selection + Shift+Click toggle. Dùng window-level mouse handler + refs để tránh stale closure.
+- **Keyboard shortcuts**: Ctrl+Z/Y, Delete, Ctrl+/-/0, Escape — dùng useRef cho callbacks để không bị stale.
+- **Member management**: Owner xem/sửa role/xóa member qua panel trong RoomPage.
+- **Invite code**: Tự động generate 8 ký tự khi tạo room. Join bằng code với role VIEWER mặc định (an toàn).
+- **Comments API**: CRUD đầy đủ với permission check (author hoặc owner mới được sửa/xóa).
+- **Docker build**: Dockerfile single-stage, docker-compose với PostgreSQL + Backend + Redis.
+- **Redis spam**: `lazyConnect: true` + `retryStrategy: () => null`.
+- **REST API endpoint table**: Đã đồng bộ tất cả 24 endpoints.
 
-Các điểm còn cần cải thiện:
+### Còn cần cải thiện
 
-- Undo/redo vẫn là logic client-side, nên cần thêm integration/E2E tests cho nhiều client, reconnect và ACK out-of-order.
-- Offline optimistic create chỉ tồn tại trong phiên hiện tại; sau reload, IndexedDB outbox vẫn là source of truth cho replay.
-- Một số nghiệp vụ nâng cao như ownership transfer vẫn chưa hoàn thiện.
-- Collaborative text hiện xử lý conflict bằng soft lease và whole-text patch; live per-character multi-user editing bằng Yjs vẫn là hướng mở rộng tương lai.
+- **Ownership transfer**: `rooms.service.ts` vẫn throw "not implemented".
+- **E2E tests**: Chưa có Playwright/Cypress. Manual test scripts đã cover multi-client scenarios.
+- **Offline outbox**: Operation replay dùng baseVersion cũ → có thể conflict khi object bị thay đổi bởi người khác trong lúc offline.
+- **Collaborative text**: Soft lease hoạt động nhưng chưa có live per-character editing bằng Yjs (TextDocument model đã có trong schema).
+- **`normalizeSnapshot`**: Silent drop invalid objects → che giấu lỗi schema migration/data corruption.
+- **WebSocket-only transport**: Đã bỏ `transports: ['websocket']` để Socket.IO tự fallback polling khi cần.
+- **Rate limiting**: Chưa có (chỉ có retryStrategy cho Redis).
 
 ---
 

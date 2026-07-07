@@ -32,12 +32,6 @@ export class CommentsService {
   }
 
   async create(roomId: string, authorId: string, dto: CreateCommentDto): Promise<CommentResponse> {
-    const hasCanvasPoint = typeof dto.x === 'number' && typeof dto.y === 'number';
-
-    if (!dto.objectId && !hasCanvasPoint) {
-      throw new NotFoundException('Comment target is required');
-    }
-
     const comment = await this.prisma.comment.create({
       data: {
         roomId,

@@ -586,6 +586,26 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
+  @SubscribeMessage('comment:new')
+  async handleCommentNew(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: { roomId?: unknown; comment?: unknown }
+  ): Promise<void> {
+    const user = client.data.user;
+    if (!user) return;
+
+    const roomId = typeof payload?.roomId === 'string' ? payload.roomId : null;
+    if (!roomId || !payload?.comment) return;
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) return;
+
+    client.to(this.getRoomChannel(roomId)).emit('comment:new', {
+      roomId,
+      comment: payload.comment
+    });
+  }
+
   @SubscribeMessage('shape:preview')
   async handleShapePreview(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -823,6 +843,10 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
 
     return undefined;
+  }
+
+  broadcastToRoom(roomId: string, event: string, payload: unknown): void {
+    this.server.to(this.getRoomChannel(roomId)).emit(event, payload);
   }
 
   private getRoomChannel(roomId: string): string {
