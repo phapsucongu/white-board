@@ -98,7 +98,7 @@ type BoardEventAcceptedPayload = {
 type BoardEventRejectedPayload = {
   roomId?: string;
   eventType?: BoardEventType;
-  reason: 'UNAUTHORIZED' | 'FORBIDDEN' | 'VALIDATION_ERROR' | 'VERSION_CONFLICT' | 'NOT_FOUND';
+  reason: 'UNAUTHORIZED' | 'FORBIDDEN' | 'VALIDATION_ERROR' | 'VERSION_CONFLICT' | 'NOT_FOUND' | 'TEXT_LEASE_CONFLICT';
   message: string;
   clientOpId?: string;
   details?: unknown;
@@ -587,10 +587,10 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   @SubscribeMessage('shape:preview')
-  handleShapePreview(
+  async handleShapePreview(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() payload: { roomId?: unknown; objectId?: unknown; transform?: unknown }
-  ): void {
+  ): Promise<void> {
     const user = client.data.user;
     if (!user) return;
 
@@ -601,6 +601,10 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       : null;
 
     if (!roomId || !objectId || !transform) return;
+
+    // Verify room membership before broadcasting
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) return;
 
     // Broadcast preview to everyone in the room except sender
     client.to(this.getRoomChannel(roomId)).emit('shape:preview', {
@@ -764,6 +768,13 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   private getBoardEventRejectionReason(error: unknown): BoardEventRejectedPayload['reason'] {
     if (error instanceof ConflictException) {
+      const response = error.getResponse();
+      if (typeof response === 'object' && response !== null && 'reason' in response) {
+        const reason = (response as Record<string, unknown>).reason;
+        if (typeof reason === 'string' && reason === 'TEXT_LEASE_CONFLICT') {
+          return 'TEXT_LEASE_CONFLICT';
+        }
+      }
       return 'VERSION_CONFLICT';
     }
 

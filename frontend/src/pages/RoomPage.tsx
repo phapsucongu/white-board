@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { apiClient, type CommentSummary, type RoomSummary, type VersionHistory } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
@@ -54,6 +54,8 @@ export function RoomPage() {
   const activeRoom = roomState.status === 'ready' ? roomState.room : null;
   const canDrawRectangle = canMutateRoom(activeRoom?.role);
   const canTagVersion = canCreateVersionTag(activeRoom?.role);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const realtime = useRoomRealtime({
     accessToken,
     currentUserId: user?.id ?? null,
@@ -76,13 +78,15 @@ export function RoomPage() {
 
     return runWithAuth((accessToken) => apiClient.getVersionHistory(activeRoom.id, accessToken))
       .then((history) => {
-        setVersionHistoryState({ status: 'ready', history });
+        if (mountedRef.current) setVersionHistoryState({ status: 'ready', history });
       })
       .catch((error: unknown) => {
-        setVersionHistoryState({
-          status: 'error',
-          message: error instanceof Error ? error.message : 'Unable to load version history'
-        });
+        if (mountedRef.current) {
+          setVersionHistoryState({
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Unable to load version history'
+          });
+        }
       });
   }, [activeRoom, runWithAuth]);
 
@@ -132,7 +136,7 @@ export function RoomPage() {
   const loadComments = useCallback(() => {
     if (!activeRoom) return Promise.resolve();
     return runWithAuth((accessToken) => apiClient.listComments(activeRoom.id, accessToken))
-      .then(setComments)
+      .then((result) => { if (mountedRef.current) setComments(result); })
       .catch((error: unknown) => {
         toastService.error(error instanceof Error ? error.message : 'Unable to load comments');
       });

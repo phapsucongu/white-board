@@ -279,6 +279,7 @@ export function useRoomRealtime({
   const socketRef = useRef<Socket | null>(null);
   const optimisticCreatesRef = useRef<Map<string, BoardObjectId>>(new Map());
   const pendingHistoryRef = useRef<PendingHistoryIntent[]>([]);
+  const previewTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [lastSnapshotRestore, setLastSnapshotRestore] =
     useState<BoardSnapshotRestoredPayload | null>(null);
@@ -352,12 +353,16 @@ export function useRoomRealtime({
       }
 
       if (!socket || !roomId || status !== 'joined') {
-        void enqueueOfflineOperation({
+        enqueueOfflineOperation({
           id: request.clientOpId,
           roomId: request.roomId,
           eventName: 'board:event',
           payload: request
-        }).then(() => setOfflineQueueCount((count) => count + 1));
+        }).then(() => setOfflineQueueCount((count) => count + 1))
+          .catch((err: unknown) => {
+            console.error('Failed to enqueue offline operation:', err);
+            setError('Unable to save operation for offline sync');
+          });
         setError('Realtime unavailable; operation queued for sync');
         return true;
       }
@@ -538,7 +543,8 @@ export function useRoomRealtime({
       if (payload.objectId) {
         setPreview(payload);
         // Auto-clear preview after 100ms if no new preview arrives
-        setTimeout(() => {
+        clearTimeout(previewTimeoutRef.current);
+        previewTimeoutRef.current = setTimeout(() => {
           setPreview((current) =>
             current?.objectId === payload.objectId ? null : current
           );
@@ -593,6 +599,8 @@ export function useRoomRealtime({
     return () => {
       socket.off();
       socket.disconnect();
+      clearTimeout(previewTimeoutRef.current);
+      previewTimeoutRef.current = undefined;
 
       if (socketRef.current === socket) {
         socketRef.current = null;

@@ -435,14 +435,14 @@ export const BoardCanvas = memo(function BoardCanvas({
         return;
       }
 
-      // Finalize rubber-band selection
-      if (selectionRect && selStart) {
-        selectObjectsInRect(selectionRect);
+      // Rubber-band selection is finalized by the window-level mouseup handler
+      // (which uses refs for accurate bounds). Just clear the visual state here.
+      if (selectionRect) {
         setSelectionRect(null);
         setSelStart(null);
       }
     },
-    [tool, rectangleDraft, circleDraft, lineDraft, selectionRect, selStart, viewport, currentUserId, roomId, onRectangleCommit, onCircleCommit, onLineCommit, selectObjectsInRect]
+    [tool, rectangleDraft, circleDraft, lineDraft, selectionRect, viewport, currentUserId, roomId, onRectangleCommit, onCircleCommit, onLineCommit]
   );
 
   // Object drag end
@@ -924,8 +924,8 @@ function getObjectBoundsForSel(obj: BoardObject): { x: number; y: number; width:
       height: Math.max(1, Math.max(...ys) - Math.min(...ys))
     };
   }
-  const w = typeof obj.props.width === 'number' ? obj.props.width : 140;
-  const h = typeof obj.props.height === 'number' ? obj.props.height : 90;
+  const w = typeof obj.props.width === 'number' ? obj.props.width : (obj.type === 'text' ? 220 : 140);
+  const h = typeof obj.props.height === 'number' ? obj.props.height : (obj.type === 'text' ? 32 : 90);
   return { x: obj.x, y: obj.y, width: w, height: h };
 }
 
