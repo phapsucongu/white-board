@@ -2,97 +2,23 @@
 
 ## 1. Tóm tắt hiện trạng
 
-Repository là một pnpm monorepo cho whiteboard cộng tác thời gian thực. Hệ thống gồm:
+Repository là một pnpm monorepo cho whiteboard cộng tác thời gian thực.
 
-- Frontend: ứng dụng web React + Vite + TypeScript, dùng Konva để vẽ canvas và Zustand để quản lý state.
-- Backend: API NestJS + TypeScript, cung cấp auth, phòng làm việc, quyền truy cập, board event sourcing và realtime qua Socket.IO.
-- Shared package: định nghĩa các type dùng chung giữa frontend và backend để giảm lệch contract giữa các module.
+- Frontend: React 19 + Vite + TypeScript, React-Konva/Konva cho canvas, Zustand cho board state, Socket.IO client cho realtime.
+- Backend: NestJS 11 + Prisma + PostgreSQL, REST API, Socket.IO gateway, JWT auth, room roles, event-sourced board state.
+- Shared package: `@whiteboard/shared` chứa type chung cơ bản cho board objects và socket event names.
+- Local dev: Docker Compose chạy backend + PostgreSQL + Redis; frontend chạy local bằng Vite.
 
-Mục tiêu của hệ thống là cho nhiều người cùng làm việc trên một bảng vẽ kỹ thuật/tactical board, có thể tạo đối tượng (hình chữ nhật, vòng tròn, đường thẳng, văn bản), di chuyển, chỉnh sửa, xóa, theo dõi người đang online, xem lịch sử phiên bản và đánh dấu checkpoint.
+Tính năng đã có: auth + refresh rotation, rooms/members/invite code, role-based access, board create/update/delete, realtime board sync, reconnect delta/snapshot, live cursor, remote selection, soft text lease, Yjs text persistence, room comments realtime, version history, restore realtime, offline outbox, optimistic create và conflict drawer.
 
-### Đánh giá nhanh độ chính xác của tài liệu
+Các điểm cần lưu ý theo code hiện tại:
 
-Tài liệu này nhìn chung mô tả đúng kiến trúc hiện tại của repository. Các điểm cần lưu ý sau khi đối chiếu với code:
+- `Comment` schema vẫn có `objectId`, `x`, `y` optional, nhưng UI hiện tại đang dùng “Room Comments” dạng room-level và chỉ gửi `body` khi tạo comment.
+- Backend đã broadcast `comment:new` khi tạo comment qua REST. Gateway cũng nhận `comment:new` từ socket để fanout, nhưng `packages/shared/src/index.ts` chưa thêm event name `comment:new`.
+- `RoomPage` đang để comments panel mở mặc định (`showComments = true`), còn presence/version panel đóng mặc định.
+- Ownership transfer chưa implement; owner không thể tự hạ role hoặc tự remove khỏi room.
 
-- Tên Socket.IO event trong shared package đã được đồng bộ lại với gateway/client, gồm `board:event:*`, `board:snapshot:restored`, cursor, selection, text lease/Yjs, và `room:error`.
-- `POST /auth/register` hiện chỉ tạo user và trả public user; token chỉ được cấp qua `POST /auth/login` hoặc `POST /auth/refresh`.
-- Version history chỉ trả tối đa 50 board event gần nhất trong danh sách tổng quan; restore tạo thêm một event `history.restore` và cập nhật snapshot.
-- Redis hiện được dùng cho Socket.IO adapter và các trạng thái cộng tác tạm thời như cursor, object selection, text lease TTL.
-- `README.md` hiện có phần mô tả cũ rằng business features còn để sau, trong khi code thực tế đã có auth, rooms, realtime board operations và schema đầy đủ.
-
-### Cập nhật ngày 2026-07-07 (cuối ngày)
-
-**UI/Design System:**
-- Chuyển toàn bộ frontend sang Tailwind CSS với design system "Tactical Precision" (dark theme, glassmorphism, Inter + JetBrains Mono fonts).
-- Component library: GlassPanel, PageHeading, StatusChip, RoleBadge, ToolButton, SectionHeading, Toaster (toast notifications).
-- Responsive mobile support với bottom navigation bar.
-- Login/Register/Dashboard/RoomPage được thiết kế lại hoàn toàn theo dark theme.
-
-**Board & Canvas:**
-- Canvas nền trắng ("Paper Mode") với grid tự scale theo viewport zoom level.
-- Toolbar nổi bên trái (Select, Rectangle, Circle, Line, Text, Pan).
-- **Multi-select**: Shift+Click để toggle, kéo chuột rubber-band để chọn vùng.
-- **Keyboard shortcuts**: Ctrl+Z/Y (undo/redo), Delete (xóa), Ctrl+/-/0 (zoom), Escape.
-- **Rotation**: Transformer `rotateEnabled=true` cho tất cả shape types.
-- Object Detail Panel hiển thị khi chọn 1 object (ID, type, position, rotation, size, style, version, creator).
-
-**Undo/Redo:**
-- Đã fix: bỏ `expectedVersion` khỏi undo payload để undo luôn thành công bất kể intermediate operations.
-- `createHistoryEntry` hỗ trợ cả 4 loại shape (đã fix type guard `isCreateBoardObjectPayload`).
-- Undo/redo stack không bị clear sau restore (người dùng có thể undo các thao tác trước restore).
-
-**Member Management:**
-- Panel quản lý thành viên trong RoomPage (bên trái): Owner xem, đổi role (OWNER/EDITOR/VIEWER), xóa member.
-- Join room bằng invite code (hiển thị code trên Dashboard room cards, nút copy).
-
-**Comments:**
-- API CRUD comments: `GET/POST /rooms/:id/comments`, `PATCH/DELETE /rooms/:id/comments/:commentId`.
-- Comment model trong Prisma schema.
-
-**Docker:**
-- Dockerfile single-stage build cho backend.
-- docker-compose.yml: PostgreSQL + Backend + Redis services.
-
-**Code Review & Bug Fixes (9 HIGH+MEDIUM bugs fixed):**
-- Rubber-band selection: fix double mouseup handlers + wrong text bounds.
-- `handleShapePreview`: thêm membership check (trước đây bỏ qua).
-- `getBoardEventRejectionReason`: phân biệt `TEXT_LEASE_CONFLICT` vs `VERSION_CONFLICT`.
-- `shape:preview setTimeout`: clean up khi unmount (dùng ref).
-- `loadVersionHistory`/`loadComments`: guard `mountedRef` chống setState sau unmount.
-- Offline operation IndexedDB failures: thêm `.catch()` handler.
-- Text lease interval: clear sau snapshot restore.
-- Redis: `lazyConnect` + `retryStrategy: () => null` để không spam log khi Redis unavailable.
-
----
-
-## 2. Công nghệ và stack chính
-
-### Frontend
-- React 19
-- Vite 7
-- TypeScript
-- Zustand cho state management
-- React-Konva để render canvas và hình dạng trực quan
-- Socket.IO client để kết nối realtime
-- React Router DOM cho routing
-- Tailwind CSS cho giao diện
-
-### Backend
-- NestJS 11
-- TypeScript
-- Prisma ORM + PostgreSQL
-- Socket.IO server
-- JWT access token + refresh token rotation
-- Bcrypt cho password hashing
-- Jest cho unit/integration test
-
-### Shared layer
-- Workspace package `packages/shared`
-- Chứa các type chính như `BoardObject`, `BoardObjectType`, `RoomId`, `UserId`, `SocketEventName`
-
----
-
-## 3. Cấu trúc thư mục chính
+## 2. Cấu trúc repository
 
 ```text
 .
@@ -102,454 +28,278 @@ Tài liệu này nhìn chung mô tả đúng kiến trúc hiện tại của rep
 │   │   ├── schema.prisma
 │   │   └── migrations/
 │   └── src/
-│       ├── app.module.ts
-│       ├── auth/             # auth, JWT, refresh token
-│       ├── board/            # event sourcing board logic
-│       ├── permissions/      # room role guards
-│       ├── prisma/           # Prisma service
-│       ├── realtime/         # Socket.IO gateway + presence
-│       ├── rooms/            # room CRUD, members, version history
-│       └── users/            # user lookup, public projection
-├── frontend/                 # React/Vite client
-│   ├── test/               # manual test scripts (collab, undo, invite, flow)
+│       ├── auth/             # register/login/refresh/logout/JWT guard
+│       ├── board/            # board event sourcing, codec, conflict resolution
+│       ├── collaboration/    # Redis adapter, cursor/selection/text lease, Yjs persistence
+│       ├── permissions/      # room role policy + guard
+│       ├── prisma/           # PrismaService
+│       ├── realtime/         # Socket.IO gateway, presence, restore publisher
+│       ├── rooms/            # rooms, members, comments, versions
+│       └── users/            # user lookup/public projection
+├── frontend/
 │   └── src/
-│       ├── api/             # typed REST client (rooms, auth, comments, members)
-│       ├── auth/            # auth context and token storage
-│       ├── board/           # board store, canvas, BoardCanvas, shape helpers
-│       ├── components/
-│       │   ├── board/       # ObjectDetailPanel, MemberManagement
-│       │   ├── layout/      # AppHeader, MobileNav
-│       │   └── ui/          # GlassPanel, PageHeading, StatusChip, RoleBadge, ToolButton, SectionHeading, Toaster
-│       ├── config/          # env config
-│       ├── layout/          # AppLayout
-│       ├── pages/           # DashboardPage, RoomPage, LoginPage, RegisterPage, NotFoundPage
-│       ├── realtime/        # useRoomRealtime hook, offlineOutbox
-│       └── versions/        # versionHistory helper
-├── packages/shared/          # shared TypeScript types
-├── docker-compose.yml        # PostgreSQL/Redis services
-└── README.md / CLAUDE.md     # documentation and operational guidance
+│       ├── api/              # typed REST client
+│       ├── auth/             # AuthProvider, route guards, token storage
+│       ├── board/            # Zustand board store + Konva canvas
+│       ├── components/       # panels, badges, UI primitives
+│       ├── config/           # env mapping
+│       ├── pages/            # Dashboard, Room, Login, Register
+│       ├── realtime/         # Socket.IO hook + IndexedDB offline outbox
+│       └── versions/         # version-history helpers
+├── packages/shared/src/index.ts
+├── docker-compose.yml
+├── AGENTS.md
+└── README.md
 ```
 
----
+Generated/local artifacts: `backend/dist/`, `frontend/dist/`, `node_modules/`, `.env`, `frontend/.env.local`.
 
-## 4. Kiến trúc tổng thể
-
-### 4.1 Sơ đồ kiến trúc tổng thể
+## 3. Runtime architecture
 
 ```mermaid
 flowchart LR
-  subgraph Client[Frontend Layer]
-    A[React App]
-    B[AuthContext]
-    C[DashboardPage]
-    D[RoomPage]
-    E[BoardCanvas]
-    F[Zustand Store]
-    G[useRoomRealtime]
-    H[MemberManagement]
-    I[ObjectDetailPanel]
-    J[Comments Panel]
-  end
+  Browser[React/Vite client]
+  AuthCtx[AuthProvider]
+  RoomPage[RoomPage]
+  Canvas[BoardCanvas]
+  Store[Zustand board store]
+  RT[useRoomRealtime]
+  REST[REST API]
+  WS[Socket.IO gateway]
+  Auth[AuthModule]
+  Rooms[RoomsModule]
+  Board[BoardModule]
+  Collab[CollaborationModule]
+  Prisma[Prisma ORM]
+  PG[(PostgreSQL)]
+  Redis[(Redis)]
 
-  subgraph Backend[Backend Services]
-    K[AuthController]
-    L[RoomsController]
-    M[CommentsController]
-    N[VersionHistoryController]
-    O[RoomGateway]
-    P[AuthService]
-    Q[RoomsService]
-    R[CommentsService]
-    S[BoardService]
-    T[VersionHistoryService]
-    U[PresenceService]
-    V[CollaborationService]
-    W[ConflictResolutionService]
-    X[RoomMemberGuard]
-  end
-
-  subgraph Data[Persistence Layer]
-    Y[(PostgreSQL)]
-    Z[Prisma ORM]
-    RDS[(Redis - optional)]
-  end
-
-  A --> B
-  A --> C
-  A --> D
-  D --> E
-  D --> F
-  D --> G
-  D --> H
-  D --> I
-  F --> G
-  B --> K
-  C --> L
-  D --> L
-  D --> M
-  D --> N
-  G --> O
-  K --> P
-  L --> Q
-  M --> R
-  N --> T
-  O --> S
-  O --> U
-  O --> V
-  O --> W
-  P --> Z
-  Q --> Z
-  R --> Z
-  S --> Z
-  T --> Z
-  U --> Z
-  V --> RDS
-  Z --> Y
+  Browser --> AuthCtx
+  Browser --> RoomPage
+  RoomPage --> Canvas
+  Canvas --> Store
+  RoomPage --> RT
+  RT --> Store
+  AuthCtx --> REST
+  RoomPage --> REST
+  RT <--> WS
+  REST --> Auth
+  REST --> Rooms
+  WS --> Board
+  WS --> Collab
+  Auth --> Prisma
+  Rooms --> Prisma
+  Board --> Prisma
+  Collab --> Prisma
+  Collab --> Redis
+  WS --> Redis
+  Prisma --> PG
 ```
 
-### 4.2 Sơ đồ luồng Authentication và Session
+Thiết kế tách rõ dữ liệu bền vững và trạng thái live:
+
+- PostgreSQL lưu users, sessions, rooms, memberships, board events, board snapshot, comments, text documents, version tags.
+- Redis dùng cho Socket.IO adapter và state TTL như cursor, selection, text lease.
+- Client chỉ render/queue intent; backend vẫn là nơi quyết định quyền và ghi mutation.
+
+## 4. Stack và commands
+
+| Layer | Công nghệ |
+|---|---|
+| Workspace | pnpm 11, TypeScript 5.9, ESLint 9 |
+| Frontend | React 19, Vite 7, Tailwind CSS 4, React Router 7, React-Konva/Konva, Zustand, Socket.IO client, Yjs, Vitest |
+| Backend | NestJS 11, Prisma 6, PostgreSQL, Socket.IO, Redis adapter, ioredis, Yjs, JWT, bcrypt, Jest |
+| Dev services | Docker Compose: backend, postgres, redis |
+
+| Command | Vai trò |
+|---|---|
+| `pnpm install` | Cài dependencies toàn workspace |
+| `cp .env.example .env` | Tạo env host/local |
+| `cp frontend/.env.example frontend/.env.local` | Trỏ Vite tới backend Docker `localhost:3001` |
+| `docker compose up --build backend` | Chạy backend + PostgreSQL + Redis; backend tự chạy `prisma migrate deploy` |
+| `pnpm dev:fe` | Chạy frontend ở `http://localhost:5173` |
+| `pnpm dev:be` | Chạy backend local ngoài Docker |
+| `pnpm lint` | ESLint toàn workspace |
+| `pnpm test` | Backend Jest + frontend Vitest |
+| `pnpm build` | Build toàn workspace |
+| `pnpm --filter backend prisma:generate` | Regenerate Prisma client |
+
+`frontend/src/config/env.ts` fallback về `http://localhost:3000` nếu thiếu `VITE_API_BASE_URL`; với setup hiện tại nên dùng `frontend/.env.local` để gọi `http://localhost:3001`.
+
+## 5. Domain model và persistence
 
 ```mermaid
-sequenceDiagram
-  participant User
-  participant Frontend as Frontend (AuthContext)
-  participant API as AuthController
-  participant AuthSvc as AuthService
-  participant DB as Prisma/Postgres
+erDiagram
+  User ||--o{ RefreshSession : owns
+  User ||--o{ Room : owns
+  User ||--o{ RoomMember : joins
+  User ||--o{ BoardEvent : authors
+  User ||--o{ Comment : writes
+  User ||--o{ TextDocument : updates
+  Room ||--o{ RoomMember : has
+  Room ||--|| BoardState : has
+  Room ||--o{ BoardEvent : records
+  Room ||--o{ VersionTag : marks
+  Room ||--o{ Comment : contains
+  Room ||--o{ TextDocument : stores
 
-  User->>Frontend: Register / Login
-  Frontend->>API: POST /auth/register
-  API->>AuthSvc: create user
-  AuthSvc->>DB: write User
-  API-->>Frontend: public user
-  Frontend->>API: POST /auth/login
-  API->>AuthSvc: validate credentials
-  AuthSvc->>DB: read/write User + RefreshSession
-  DB-->>AuthSvc: user + session
-  AuthSvc-->>API: accessToken + refreshToken
-  API-->>Frontend: auth response
-  Frontend->>API: GET /auth/me
-  API-->>Frontend: user profile
-  Frontend->>API: POST /auth/refresh when access token expires
-  API->>AuthSvc: rotate refresh token
-  AuthSvc->>DB: revoke old session + create new
-  AuthSvc-->>API: new tokens
+  User {
+    string id
+    string email
+    string passwordHash
+    string displayName
+    datetime createdAt
+    datetime updatedAt
+  }
+  RefreshSession {
+    string id
+    string userId
+    string tokenHash
+    datetime expiresAt
+    datetime revokedAt
+    datetime createdAt
+  }
+  Room {
+    string id
+    string name
+    string ownerId
+    string inviteCode
+    datetime createdAt
+    datetime updatedAt
+  }
+  RoomMember {
+    string id
+    string roomId
+    string userId
+    enum role
+    datetime createdAt
+    datetime updatedAt
+  }
+  BoardState {
+    string id
+    string roomId
+    int version
+    json snapshotJson
+    datetime updatedAt
+  }
+  BoardEvent {
+    string id
+    string roomId
+    int version
+    string eventType
+    json payloadJson
+    string actorId
+    string clientOpId
+    datetime createdAt
+  }
+  VersionTag {
+    string id
+    string roomId
+    int version
+    string label
+    datetime createdAt
+  }
+  Comment {
+    string id
+    string roomId
+    string objectId
+    float x
+    float y
+    string body
+    bool resolved
+    string authorId
+    datetime createdAt
+    datetime updatedAt
+  }
+  TextDocument {
+    string id
+    string roomId
+    string objectId
+    string ydocBase64
+    string text
+    string updatedBy
+    datetime updatedAt
+    datetime createdAt
+  }
 ```
 
-### 4.3 Sơ đồ module Room, Membership và Phân quyền
+### 5.1 Bảng dữ liệu chính
 
-```mermaid
-flowchart TD
-  U[User]
-  UI[DashboardPage]
-  RC[RoomsController]
-  RS[RoomsService]
-  RM[RoomMemberGuard]
-  RPR[RequiredRoomRole]
-  PR[RoomPermissions]
-  DB[(Room / RoomMember / BoardState)]
+| Model | Cột chính | Mục đích và thiết kế |
+|---|---|---|
+| `User` | `id`, `email`, `passwordHash`, `displayName`, `createdAt`, `updatedAt` | Tài khoản đăng nhập. `email` unique; `passwordHash` không trả về client. |
+| `RefreshSession` | `id`, `userId`, `tokenHash`, `expiresAt`, `revokedAt`, `createdAt` | Refresh token rotation. Token raw client giữ là `sessionId.secret`; DB chỉ lưu `tokenHash`. |
+| `Room` | `id`, `name`, `ownerId`, `inviteCode`, `createdAt`, `updatedAt` | Workspace cộng tác. `inviteCode` unique để join room. |
+| `RoomMember` | `id`, `roomId`, `userId`, `role`, `createdAt`, `updatedAt` | Role theo room. Unique `(roomId, userId)`. |
+| `BoardState` | `id`, `roomId`, `version`, `snapshotJson`, `updatedAt` | Snapshot hiện tại để client load/reconnect nhanh. |
+| `BoardEvent` | `id`, `roomId`, `version`, `eventType`, `payloadJson`, `actorId`, `clientOpId`, `createdAt` | Append-only timeline. Unique `(roomId, version)` và `(roomId, clientOpId)`. |
+| `VersionTag` | `id`, `roomId`, `version`, `label`, `createdAt` | Checkpoint label cho board version. Unique `(roomId, version, label)`. |
+| `Comment` | `id`, `roomId`, `objectId`, `x`, `y`, `body`, `resolved`, `authorId`, `createdAt`, `updatedAt` | Room comment/annotation. Schema còn optional target fields, UI hiện chỉ tạo room-level comments. |
+| `TextDocument` | `id`, `roomId`, `objectId`, `ydocBase64`, `text`, `updatedBy`, `updatedAt`, `createdAt` | Persist Yjs state và plain text cho text object. Unique `objectId`. |
 
-  U --> UI
-  UI --> RC
-  RC --> RS
-  RS --> DB
-  RC --> RM
-  RM --> PR
-  RPR --> RM
-  PR --> RM
-  RM --> RC
+### 5.2 Chi tiết RefreshSession và VersionTag
 
-  classDef role fill:#e0f2fe,stroke:#0284c7,color:#0f172a;
-  class U,UI,RC,RS,DB role;
-```
-
-### 4.4 Sơ đồ luồng Board Event Sourcing
-
-```mermaid
-sequenceDiagram
-  participant Client as Client A / B
-  participant Gateway as RoomGateway
-  participant Board as BoardService
-  participant Conflict as ConflictResolutionService
-  participant DB as PostgreSQL
-
-  Client->>Gateway: board:event {eventType, payload, baseVersion, clientOpId}
-  Gateway->>Gateway: validate role + membership
-  Gateway->>Board: applyBoardEvent(input)
-  Board->>DB: read current BoardState + version
-  alt baseVersion mismatch
-    Board->>Conflict: resolve conflict
-    Conflict-->>Board: merged/rejected result
-  end
-  Board->>DB: write BoardEvent row
-  Board->>DB: upsert BoardState snapshot
-  Board-->>Gateway: accepted result + new snapshot
-  Gateway-->>Client: board:event:accepted
-  Gateway-->>OtherClients: board:event:broadcast
-```
-
-### 4.4b Sơ đồ Undo/Redo Flow
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant Canvas as BoardCanvas
-  participant Hook as useRoomRealtime
-  participant Server as Backend
-
-  User->>Canvas: draw shape / Ctrl+Z
-  Canvas->>Hook: sendRectangleCreate() / undo()
-  Hook->>Hook: createHistoryEntry(operation)
-  Hook->>Hook: enqueuePendingHistory(entry)
-  Hook->>Server: board:event {inverse operation, no expectedVersion}
-  Server-->>Hook: board:event:accepted
-  Hook->>Hook: applyAcceptedEvent → update Zustand store
-  Hook->>Hook: completePendingHistory → move undo↔redo stack
-  Note over Hook: Undo always succeeds (no expectedVersion check)
-```
-
-### 4.4c Sơ đồ Rubber-band Multi-Select
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant Canvas as BoardCanvas
-  participant Win as window handlers
-  participant Store as Zustand Store
-
-  User->>Canvas: mousedown on empty area (select tool)
-  Canvas->>Canvas: selDragRef.active = true
-  User->>Win: drag mouse across canvas
-  Win->>Canvas: mousemove updates selection rect
-  Canvas->>Canvas: render rubber-band preview
-  User->>Win: mouseup ends drag
-  Win->>Canvas: compute selection rect bounds
-  Canvas->>Store: setSelectedObjectIds(intersected)
-  Store-->>Canvas: re-render with selection boxes
-```
-
-### 4.5 Sơ đồ module Quản lý Phiên bản và Restore
-
-```mermaid
-flowchart LR
-  A[RoomPage]
-  B[VersionHistoryController]
-  C[VersionHistoryService]
-  D[BoardService]
-  E[BoardEvent Table]
-  F[VersionTag Table]
-  G[BoardState Table]
-  H[Restore Action]
-
-  A --> B
-  B --> C
-  C --> E
-  C --> F
-  C --> G
-  C --> D
-  D --> G
-  C --> H
-  H --> E
-  H --> G
-```
-
-### 4.5b Sơ đồ luồng Restore Version
-
-```mermaid
-sequenceDiagram
-  participant Owner
-  participant RoomPage
-  participant API as VersionHistoryController
-  participant Svc as VersionHistoryService
-  participant Board as BoardService
-  participant DB
-
-  Owner->>RoomPage: Click "Restore" on v15
-  RoomPage->>API: POST /rooms/:id/versions/15/restore
-  API->>Svc: restoreVersion(roomId, 15, actorId)
-  Svc->>DB: SELECT events WHERE version <= 15
-  Svc->>Svc: replay events → rebuild snapshot
-  loop for each event 1..15
-    Svc->>Board: applyEventToSnapshot(snapshot, event)
-    Board-->>Svc: updated snapshot
-  end
-  Svc->>DB: BEGIN transaction
-  Svc->>DB: read current boardState.version
-  Svc->>DB: INSERT BoardEvent (history.restore, version=N+1)
-  Svc->>DB: UPDATE BoardState (snapshot restored, version=N+1)
-  Svc->>DB: COMMIT
-  Svc-->>API: { version: N+1, restoredFromVersion: 15 }
-  API-->>RoomPage: restore result
-  RoomPage->>API: GET /rooms/:id/board (reload snapshot)
-  API-->>RoomPage: new board snapshot
-  RoomPage->>RoomPage: setBoardSnapshot → update Zustand store
-  RoomPage->>RoomPage: reloadVersionHistory
-  Note over RoomPage: Undo/redo stacks preserved<br/>User can still undo pre-restore ops
-```
-
-### 4.6 Sơ đồ module Presence và Realtime Collaboration
-
-```mermaid
-flowchart TD
-  A[Socket Client A]
-  B[Socket Client B]
-  C[RoomGateway]
-  D[PresenceService]
-  E[CollaborationService]
-  F[BoardService]
-  G[Room Member State]
-
-  A --> C
-  B --> C
-  C --> D
-  C --> E
-  C --> F
-  C --> G
-  D -->|presence:update| A
-  D -->|presence:update| B
-  E -->|cursor:update| A
-  E -->|cursor:update| B
-  E -->|selection:update| A
-  E -->|selection:update| B
-  E -->|text:lease:update| A
-  E -->|text:lease:update| B
-  F -->|board:event:broadcast| A
-  F -->|board:event:broadcast| B
-```
-
-### 4.6b Sơ đồ Member Management + Invite Code
-
-```mermaid
-sequenceDiagram
-  participant Owner
-  participant Dashboard
-  participant API as RoomsController
-  participant Service as RoomsService
-  participant DB
-  participant NewUser
-
-  Owner->>Dashboard: Create Room
-  Dashboard->>API: POST /rooms
-  API->>Service: createRoom(name, userId)
-  Service->>DB: INSERT Room + inviteCode
-  Service->>DB: INSERT RoomMember(OWNER)
-  DB-->>Dashboard: room + inviteCode
-
-  Owner->>NewUser: Share invite code "ABCD1234"
-  NewUser->>Dashboard: Join Room → enter code
-  Dashboard->>API: POST /rooms/join {inviteCode}
-  API->>Service: joinByInviteCode(code, userId)
-  Service->>DB: find room by code
-  Service->>DB: INSERT RoomMember(VIEWER)
-  DB-->>NewUser: joined as VIEWER
-
-  Owner->>Dashboard: RoomPage → Members panel
-  Dashboard->>API: GET /rooms/:id/members
-  API-->>Owner: member list
-  Owner->>API: PATCH /rooms/:id/members/:userId {role: EDITOR}
-  API-->>Owner: role updated → NewUser can now edit
-```
-
-### 4.6c Sơ đồ Comments Flow
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant RoomPage
-  participant API as CommentsController
-  participant Service as CommentsService
-  participant DB
-
-  User->>RoomPage: Open comments panel
-  RoomPage->>API: GET /rooms/:id/comments
-  API->>Service: list(roomId)
-  Service->>DB: SELECT * FROM Comment WHERE roomId
-  DB-->>RoomPage: comment list
-
-  User->>RoomPage: Type comment → Submit
-  RoomPage->>API: POST /rooms/:id/comments {body, x?, y?, objectId?}
-  API->>Service: create(roomId, authorId, dto)
-  Service->>DB: INSERT Comment
-  DB-->>RoomPage: new comment
-
-  User->>RoomPage: Edit or Resolve comment
-  RoomPage->>API: PATCH /rooms/:id/comments/:commentId
-  API->>Service: update(roomId, commentId, actorId, role, dto)
-  Service->>DB: UPDATE Comment (only author or owner)
-  DB-->>RoomPage: updated comment
-```
-
-### 4.7 Mô hình hệ thống
-
-Hệ thống có thể được hiểu như một ứng dụng web full-stack với ba lớp chính:
-
-1. Lớp UI (frontend)
-   - Hiển thị dashboard, room, board canvas, người online, lịch sử phiên bản.
-   - Gửi thao tác đến backend bằng REST hoặc Socket.IO.
-
-2. Lớp dịch vụ nghiệp vụ (backend)
-   - Xác thực người dùng, quản lý phòng, kiểm soát quyền, xử lý event board, lưu board state và lịch sử.
-
-3. Lớp dữ liệu (PostgreSQL/Prisma)
-   - Bảo quản users, rooms, memberships, board state, board events, version tags.
-
-### 4.8 Nguyên tắc thiết kế quan trọng
-
-- Board mutations là server-authoritative.
-  - Client không nên tự tin rằng role của mình hợp lệ; mọi thay đổi board phải đi qua backend.
-- Dữ liệu board dùng event sourcing.
-  - Mỗi thao tác tạo/sửa/xóa đối tượng được ghi thành event và áp dụng lên snapshot.
-- Realtime là một phần quan trọng của UX.
-  - Socket.IO đảm bảo cập nhật state nhanh giữa nhiều người dùng trong cùng room.
-- Quyền truy cập theo vai trò.
-  - `OWNER`, `EDITOR`, `VIEWER` được kiểm tra bằng guards và decorators.
-
----
-
-## 5. Thiết kế dữ liệu và schema chính
-
-### 5.1 Prisma models
-
-#### User
-- Lưu thông tin đăng nhập và profile.
-- Mỗi user có thể sở hữu nhiều room, là thành viên nhiều room, tạo nhiều board events.
+Repo không có bảng `RefreshToken`. Refresh token được quản lý bằng `RefreshSession`.
 
 #### RefreshSession
-- Lưu refresh token đã hash để hỗ trợ rotation.
-- Giúp backend revoke token cũ và tạo token mới sau refresh.
 
-#### Room
-- Đại diện cho một workspace/không gian cộng tác.
-- Có `ownerId`, `inviteCode`, `members`, `boardState`, `boardEvents`.
-
-#### RoomMember
-- Liên kết user và room.
-- Mỗi user trong một room có một `role` duy nhất.
-
-#### BoardState
-- Snapshot hiện tại của board cho một room.
-- Gồm `version` và `snapshotJson`.
-
-#### BoardEvent
-- Append-only event log.
-- Mỗi event có `roomId`, `version`, `eventType`, `payloadJson`, `actorId`.
-- Đây là nguồn dữ liệu lịch sử cho replay, sync và version history.
+| Column | Type | Constraint / ý nghĩa |
+|---|---|---|
+| `id` | `String` | Primary key, UUID; là phần `sessionId` trong refresh token. |
+| `userId` | `String` | FK tới `User.id`, `onDelete: Cascade`, có index. |
+| `tokenHash` | `String` | Bcrypt hash của refresh secret; không lưu token raw. |
+| `expiresAt` | `DateTime` | Hết hạn theo `REFRESH_TOKEN_TTL_DAYS`. |
+| `revokedAt` | `DateTime?` | `null` nếu còn hiệu lực; set khi refresh rotation/logout. |
+| `createdAt` | `DateTime` | Default `now()`. |
 
 #### VersionTag
-- Chấm checkpoint tại một version cụ thể.
-- Cung cấp tên gắn kết cho trạng thái board tại một thời điểm.
 
-#### Comment
-- Bình luận gắn vào room, có thể gắn vào object (`objectId`) hoặc tọa độ canvas (`x`, `y`).
-- Có trạng thái `resolved`. Chỉ author hoặc OWNER mới được sửa/xóa.
+| Column | Type | Constraint / ý nghĩa |
+|---|---|---|
+| `id` | `String` | Primary key, UUID. |
+| `roomId` | `String` | FK tới `Room.id`, `onDelete: Cascade`, có index. |
+| `version` | `Int` | Board version được gắn nhãn, có index. |
+| `label` | `String` | Tên checkpoint user nhập. |
+| `createdAt` | `DateTime` | Default `now()`. |
 
-#### TextDocument
-- Lưu trữ Yjs document cho collaborative text editing (tương lai).
-- Mỗi text object có một TextDocument riêng với `ydoc` binary.
+### 5.3 Thiết kế Comment hiện tại
 
-### 5.2 Mô hình dữ liệu board
+Schema `Comment` vẫn hỗ trợ target optional:
 
-Board state được biểu diễn như một snapshot object map:
+- `objectId` cho object annotation.
+- `x`, `y` cho canvas annotation/pin.
+- `roomId` luôn có để phân vùng comment theo room.
+
+Tuy nhiên UI hiện tại đã đơn giản hóa thành room-level comments:
+
+- `RoomPage` có panel `Room Comments`.
+- `handleCreateComment()` gọi `apiClient.createComment(activeRoom.id, { body }, token)`.
+- Không còn `commentTarget` trong `RoomPage`; `BoardCanvas` vẫn còn prop comment tool/pins nhưng không được truyền từ `RoomPage` hiện tại.
+- `CommentsService.create()` không còn bắt buộc phải có `objectId` hoặc `x/y`; comment chỉ cần `body`.
+- `CommentsController.create()` broadcast realtime `comment:new` sau khi lưu DB.
+
+Vì vậy `objectId/x/y` hiện là schema/API capability còn tồn tại, không phải luồng UI chính.
+
+### 5.4 Board snapshot
+
+```ts
+type BoardSnapshot = {
+  objects: Record<BoardObjectId, BoardObject>;
+};
+```
+
+`BoardObject` có `id`, `roomId`, `type`, `x`, `y`, `rotation`, `version`, `createdBy`, `updatedBy`, timestamps, `props`, `metadata`, `deleted`. Delete là soft-delete.
+
+| Type | Props chính |
+|---|---|
+| `rectangle` | `width`, `height`, `fill`, `stroke`, `strokeWidth` |
+| `circle` | `radius`, `fill`, `stroke`, `strokeWidth` |
+| `line` | `points`, `stroke`, `strokeWidth` |
+| `text` | `text`, `width`, `fontSize`, `fill` |
+
+### 5.5 Payload envelope
+
+New `BoardEvent.payloadJson` lưu dạng:
 
 ```ts
 {
@@ -559,129 +309,235 @@ Board state được biểu diễn như một snapshot object map:
 }
 ```
 
-Mỗi object gồm:
-- id
-- type (`rectangle`, `circle`, `line`, `text`)
-- vị trí x/y
-- rotation
-- version
-- createdBy/updatedBy
-- timestamps
-- props/metadata
-- deleted flag
+`decodeBoardEventPayload()` vẫn đọc legacy raw payload. API/socket tiếp tục trả raw payload cho frontend.
 
-Điều này cho phép backend áp dụng event create/update/delete lên snapshot một cách tuần tự.
+### 5.6 Chiến lược lưu thay đổi nhỏ, thay đổi lớn và live state
 
----
+```mermaid
+flowchart TD
+  Change{Client change}
+  Small[Object create/update/delete]
+  Text[Text edit]
+  Comment[Room comment]
+  Live[Cursor/selection/text lease/shape preview]
+  Offline[Offline board operation]
+  Restore[Version restore or large reset]
+  Reconnect{Reconnect gap}
 
-## 6. Các module chính và vai trò
+  Change --> Small
+  Change --> Text
+  Change --> Comment
+  Change --> Live
+  Change --> Offline
+  Change --> Restore
 
-### 6.1 Backend modules
+  Small --> BoardEvent[BoardEvent envelope]
+  BoardEvent --> Snapshot[BoardState snapshotJson + version]
+  BoardEvent --> Broadcast[board:event:accepted/broadcast]
 
-| Module | Vai trò |
-|---|---|
-| `AuthModule` | Đăng ký, đăng nhập, refresh token, logout, tạo JWT |
-| `UsersModule` | Tra cứu user và chuyển sang public user projection |
-| `RoomsModule` | CRUD room, quản lý member, invite code, version history, comments API |
-| `BoardModule` | Xử lý event sourcing board, apply event, sync delta/snapshot, conflict resolution |
-| `RealtimeModule` | Socket.IO gateway, presence, room join, broadcast board events |
-| `CollaborationModule` | Multi-cursor, live selection, text lease (soft lock TTL), Yjs sync (Redis adapter optional) |
-| `PermissionsModule` | Guards và decorators kiểm tra role phòng |
-| `PrismaModule` | Service Prisma singleton |
+  Text --> YDoc[TextDocument ydocBase64 + text]
+  YDoc --> TextBoardEvent[object:update props.text]
+  TextBoardEvent --> BoardEvent
 
-### 6.2 Frontend modules
+  Comment --> CommentRow[Comment row]
+  CommentRow --> CommentBroadcast[comment:new on create]
 
-| Module | Vai trò |
-|---|---|
-| `auth/` | AuthContext, token storage, auto refresh session, `runWithAuth` retry wrapper |
-| `api/` | Typed REST client (`ApiClient`) — auth, rooms, members, comments, version history, invite code |
-| `board/` | Zustand store (`useBoardStore`), BoardCanvas (Konva Stage + Transformer + shape rendering), shape creation helpers cho rectangle/circle/line/text |
-| `realtime/` | Hook `useRoomRealtime` — Socket.IO lifecycle, undo/redo queue (FIFO `pendingHistoryRef`), presence, delta/snapshot sync, `offlineOutbox` (IndexedDB queue cho offline operations) |
-| `pages/` | DashboardPage (room cards + invite code + delete), RoomPage (canvas + panels + comments), LoginPage, RegisterPage |
-| `components/board/` | `MemberManagement` (owner chỉnh role/xóa), `ObjectDetailPanel` (thông tin object khi chọn) |
-| `components/ui/` | GlassPanel, PageHeading, StatusChip, RoleBadge, ToolButton, SectionHeading, Toaster |
-| `components/layout/` | AppHeader (navbar với glassmorphism), MobileNav (bottom bar mobile) |
-| `versions/` | `formatVersionEventType`, `getVersionActorLabel`, `getTagsForVersion`, `canCreateVersionTag` |
+  Live --> RedisTTL[Redis TTL + process memory]
+  RedisTTL --> NoHistory[No Postgres history]
 
----
+  Offline --> IndexedDB[IndexedDB whiteboard-offline/outbox]
+  IndexedDB --> Replay[Replay board:event after reconnect]
+  Replay --> BoardEvent
 
-## 7. Các tính năng hiện có
+  Restore --> RestoreEvent[history.restore envelope with restoredSnapshot]
+  RestoreEvent --> Snapshot
+  RestoreEvent --> RestoreBroadcast[board:snapshot:restored]
 
-### 7.1 Authentication và session
+  Reconnect -->|gap <= 50| Delta[Return missed BoardEvent delta]
+  Reconnect -->|gap > 50 or invalid| FullSnapshot[Return BoardState snapshot]
+```
 
-Hệ thống hỗ trợ:
-- Register / Login
-- Access token và refresh token
-- Refresh token rotation (token cũ bị revoke khi refresh mới)
-- Logout
-- Auto restore session từ local storage
+| Loại thay đổi | Cách lưu | Cách phát realtime | Ghi chú thiết kế |
+|---|---|---|---|
+| Object create/update/delete nhỏ | Append `BoardEvent` dạng envelope và cập nhật `BoardState.snapshotJson` | `board:event:accepted` cho sender, `board:event:broadcast` cho client khác | Event giữ audit trail; snapshot giúp load nhanh. |
+| Text edit | Upsert `TextDocument` (`ydocBase64`, `text`) rồi ghi thêm `object:update props.text` | `text:yjs:accepted/broadcast` và board event tương ứng | Lease chặn hai user sửa cùng text object đồng thời; UI hiện commit whole-text. |
+| Comment room-level | Insert/update/delete `Comment` row | Create broadcast `comment:new`; update/delete chưa có event realtime riêng | Schema còn optional `objectId/x/y`, nhưng RoomPage hiện chỉ tạo comment theo room. |
+| Cursor/selection/lease/preview | Redis TTL + memory | Broadcast socket only | Trạng thái tạm thời, không replay sau reload. |
+| Offline board operation | IndexedDB `whiteboard-offline/outbox` lưu request `board:event` | Replay khi socket join lại | Accepted thì remove; rejected thì mark `conflicted`. |
+| Restore hoặc reset lớn | `history.restore` event chứa `restoredSnapshot`, cập nhật full `BoardState` | `board:snapshot:restored` | Client thay toàn bộ snapshot và clear undo/redo/selection/pending. |
+| Reconnect nhiều thay đổi | Không ghi mới; đọc từ `BoardEvent` hoặc `BoardState` | `room:joined` trả delta/snapshot | Delta tối đa 50 events, quá ngưỡng trả snapshot. |
 
-Luồng hoạt động:
-1. User đăng ký qua `/auth/register`, backend tạo user và trả public profile.
-2. User đăng nhập qua `/auth/login`, backend trả `accessToken` + `refreshToken`.
-3. Frontend lưu refresh token và gọi API `/auth/me` để xác thực người dùng.
-4. Khi access token hết hạn, `AuthContext` tự gọi `/auth/refresh`; backend revoke session cũ và tạo refresh session mới.
+## 6. Backend design
 
-### 7.2 Quản lý phòng và thành viên
+```mermaid
+flowchart TD
+  AppModule --> AuthModule
+  AppModule --> RoomsModule
+  AppModule --> RealtimeModule
+  AppModule --> BoardModule
+  AppModule --> PermissionsModule
+  AppModule --> PrismaModule
+  AppModule --> UsersModule
+  RoomsModule --> RoomsController
+  RoomsModule --> CommentsController
+  RoomsModule --> VersionHistoryController
+  RoomsModule --> RoomsService
+  RoomsModule --> CommentsService
+  RoomsModule --> VersionHistoryService
+  RealtimeModule --> RoomGateway
+  RealtimeModule --> PresenceService
+  RealtimeModule --> RealtimeRoomEventsService
+  RealtimeModule --> CollaborationModule
+  BoardModule --> BoardService
+  BoardModule --> ConflictResolutionService
+  CollaborationModule --> CollaborationService
+```
 
-User có thể:
-- Tạo room mới
-- Xem danh sách room mình tham gia
-- Tham gia room bằng invite code
-- Xem danh sách member
-- Thêm/xóa member (dựa trên quyền OWNER)
-- Thay đổi role member
+### 6.1 Auth
 
-Room có vai trò:
-- `OWNER`: quản trị phòng, có thể xóa phòng và thay đổi member
-- `EDITOR`: có thể chỉnh sửa board
-- `VIEWER`: chỉ xem
+```mermaid
+sequenceDiagram
+  participant Client
+  participant AuthController
+  participant AuthService
+  participant DB as PostgreSQL
 
-### 7.3 Bảng vẽ và thao tác board
+  Client->>AuthController: POST /auth/register
+  AuthController->>AuthService: create user
+  AuthService->>DB: insert User(passwordHash)
+  AuthController-->>Client: public user
+  Client->>AuthController: POST /auth/login
+  AuthService->>DB: create RefreshSession
+  AuthController-->>Client: accessToken + refreshToken
+  Client->>AuthController: POST /auth/refresh
+  AuthService->>DB: revoke old session + create new session
+  AuthController-->>Client: rotated tokens
+```
 
-Frontend cho phép người dùng:
-- chọn công cụ
-- vẽ rectangle/circle/line/text
-- di chuyển object
-- đổi kích thước / transform object
-- chọn nhiều object bằng rubber-band selection
-- xóa object
-- undo / redo
+`register` không trả token; frontend login ngay sau register. Refresh token raw có dạng `sessionId.secret`, DB lưu bcrypt hash của secret. `JwtAuthGuard` verify Bearer access token và gắn public user vào request.
 
-Các thao tác board được gửi đến backend dưới dạng board event.
+### 6.2 Roles và permission
 
-### 7.4 Realtime collaboration
+```mermaid
+flowchart LR
+  Request --> JwtAuthGuard
+  JwtAuthGuard --> RoomMemberGuard
+  RoomMemberGuard --> Membership[(RoomMember)]
+  RequiredRole[@RequiredRoomRole] --> RoomMemberGuard
+  RoomMemberGuard --> Policy[canSatisfyRequiredRoomRole]
+  Policy --> Handler[Controller handler]
+```
 
-Khi một user thao tác board:
-1. Frontend tạo payload thao tác.
-2. Gửi event qua Socket.IO tới backend.
-3. Backend validate, áp dụng event, lưu vào DB.
-4. Backend broadcast cho các client khác trong room.
-5. Client khác cập nhật state board của mình.
+| Role | View room | Edit board/tag | Manage room/member/restore |
+|---|---:|---:|---:|
+| `OWNER` | yes | yes | yes |
+| `EDITOR` | yes | yes | no |
+| `VIEWER` | yes | no | no |
 
-### 7.5 Presence và người online
+Ownership transfer chưa implement; backend chặn owner tự đổi role hoặc tự remove.
 
-Backend dùng `PresenceService` để theo dõi:
-- ai đang ở room nào
-- mỗi user có thể có nhiều socket (multi-session)
-- khi disconnect thì remove khỏi presence list
+### 6.3 Board event sourcing
 
-Frontend hiển thị danh sách online ở sidebar phòng.
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Gateway as RoomGateway
+  participant Board as BoardService
+  participant Conflict as ConflictResolutionService
+  participant DB as PostgreSQL
+  participant Others
 
-### 7.6 Version history và checkpoint
+  Client->>Gateway: board:event {eventType,payload,baseVersion,clientOpId}
+  Gateway->>Gateway: auth + membership + OWNER/EDITOR
+  Gateway->>Board: applyBoardEvent()
+  Board->>DB: read BoardState + existing clientOpId
+  alt existing clientOpId
+    Board-->>Gateway: previous accepted result
+  else stale baseVersion
+    Board->>DB: read missed events
+    Board->>Conflict: resolveStaleEvent()
+  end
+  Board->>DB: insert BoardEvent + upsert BoardState
+  Gateway-->>Client: board:event:accepted
+  Gateway-->>Others: board:event:broadcast
+```
 
-Hệ thống cho phép:
-- xem tối đa 50 sự kiện gần đây của board trong version history overview
-- tạo tag/chấm checkpoint cho một version hiện có hoặc version 0
-- restore về một version cụ thể
+Thiết kế xử lý:
 
-Những dữ liệu này lưu trong `BoardEvent` và `VersionTag`. Khi restore, backend replay events đến target version để dựng snapshot, ghi thêm một event `history.restore`, rồi cập nhật `BoardState` lên version mới.
+- `clientOpId` idempotency cho retry/offline replay.
+- `baseVersion` kiểm version board client biết.
+- `expectedVersion` kiểm object update/delete.
+- Stale `object:update` auto-merge nếu missed events sửa field khác nhau; same-field conflict trả `VERSION_CONFLICT`.
+- `object:delete` là soft-delete.
 
----
+### 6.4 Conflict resolution
 
-## 8. Các luồng chính của hệ thống
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Gateway as RoomGateway
+  participant Board as BoardService
+  participant Conflict as ConflictResolutionService
+  participant DB as PostgreSQL
 
-### 8.1 Luồng đăng nhập và khởi tạo session
+  Client->>Gateway: board:event {baseVersion, expectedVersion, clientOpId}
+  Gateway->>Board: applyBoardEvent()
+  Board->>DB: read BoardState and BoardEvent by clientOpId
+  alt duplicate clientOpId
+    Board-->>Gateway: return previous accepted event
+  else baseVersion equals current version
+    Board->>Board: apply create/update/delete
+    Board->>DB: insert BoardEvent + update BoardState
+  else baseVersion is stale
+    Board->>DB: load missed events after baseVersion
+    Board->>Conflict: compare client patch fields with missed patches
+    alt stale object:update touches different fields
+      Conflict-->>Board: clear expectedVersion and allow merge
+      Board->>DB: insert merged BoardEvent + update BoardState
+    else same field, delete, create, non-update, or invalid future version
+      Conflict-->>Gateway: throw BoardConflictException
+      Gateway-->>Client: board:event:rejected {reason, details, clientOpId}
+    end
+  end
+```
+
+| Trường hợp | Kết quả | Dữ liệu trả về client |
+|---|---|---|
+| Retry cùng `clientOpId` | Idempotent accept; không ghi event mới | Accepted event/version cũ |
+| `baseVersion` lớn hơn current | Reject | `VERSION_CONFLICT`, `conflictingFields: ['board.version']` |
+| Stale `object:create` hoặc `object:delete` | Reject | Conflict theo `board.version` |
+| Stale `object:update`, missed events chạm object khác | Merge | Event mới ghi trên snapshot current |
+| Stale `object:update`, cùng object nhưng khác field | Merge | `expectedVersion` bị bỏ để patch áp vào object hiện tại |
+| Stale `object:update`, cùng field | Reject | `conflictingFields`, `clientPatch`, `serverPatch`, `currentObject` |
+| Object đã bị xóa | Reject | `conflictingFields: ['object.deleted']`, `currentObject` |
+| Text object đang có lease của user khác | Reject ở gateway/collaboration layer | `text:lease:denied` hoặc board/text error |
+| Offline replay bị reject | Giữ operation ở IndexedDB | `status: conflicted`, conflict drawer hiển thị để retry/discard |
+
+Thiết kế này ưu tiên merge tự động cho patch nhỏ không đụng nhau, nhưng không cố đoán khi hai client sửa cùng field. Với text object, lớp text lease đứng trước board conflict để tránh hai editor cùng sửa một document trong phiên live.
+
+### 6.5 Reconnect sync
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Gateway
+  participant Board
+  participant DB
+
+  Client->>Gateway: room:join {roomId,lastKnownVersion}
+  Gateway->>DB: verify RoomMember
+  Gateway->>Board: getReconnectSync()
+  alt gap <= 50 and version valid
+    Board->>DB: BoardEvent version > lastKnownVersion
+    Gateway-->>Client: room:joined {syncMode: delta, missedEvents}
+  else snapshot required
+    Gateway-->>Client: room:joined {syncMode: snapshot, snapshot}
+  end
+```
+
+Ngưỡng delta hiện là 50 events.
+
+### 6.6 Realtime collaboration
 
 ```mermaid
 flowchart TD
@@ -691,395 +547,391 @@ flowchart TD
   CollaborationService --> RedisTTL[(Redis TTL keys)]
   CollaborationService --> TextDocument[(PostgreSQL TextDocument)]
   CollaborationService --> BoardService
-
-  RedisTTL --> CursorKeys[cursor:roomId:socketId]
-  RedisTTL --> SelectionKeys[selection:roomId:socketId]
-  RedisTTL --> LeaseKeys[lease:roomId:objectId]
+  RedisTTL --> Cursor[cursor:roomId:socketId]
+  RedisTTL --> Selection[selection:roomId:socketId]
+  RedisTTL --> Lease[lease:roomId:objectId]
 ```
 
-Collaboration design xử lý:
+- Socket auth qua `handshake.auth.token` hoặc `Authorization`.
+- Presence gom nhiều socket theo user trong process memory.
+- Redis adapter được gắn nếu có `REDIS_URL`.
+- Cursor TTL 10s, selection TTL 30s, text lease TTL 30s.
+- Disconnect xóa cursor/selection/lease và broadcast remove/update.
 
-- Socket authentication qua `handshake.auth.token` hoặc `Authorization` header.
-- `PresenceService` gom nhiều socket của cùng user thành một presence record trong process.
-- `CollaborationService.attachSocketAdapter()` gắn Redis adapter nếu có `REDIS_URL`.
-- Cursor TTL 10 giây, selection TTL 30 giây, text lease TTL 30 giây.
-- Disconnect xóa cursor, selection, text lease của socket và broadcast remove/update event.
-
-### 6.6 Text editing
+### 6.7 Text editing
 
 ```mermaid
 sequenceDiagram
-  participant User
   participant Client
-  participant Gateway as RoomGateway
+  participant Gateway
   participant Collab as CollaborationService
-  participant Board as BoardService
   participant DB as PostgreSQL
+  participant Board
   participant Others
 
-  User->>Client: double-click text
   Client->>Gateway: text:lease:claim
   Gateway->>Collab: claimTextLease()
-  alt another active lease
+  alt active lease by another user
     Gateway-->>Client: text:lease:denied
-  else acquired/renewed
-    Gateway-->>Client: text:lease:update
+  else acquired
     Gateway-->>Others: text:lease:update
-    Client->>Gateway: text:yjs:update {updateBase64}
+    Client->>Gateway: text:yjs:update
     Gateway->>Collab: applyTextUpdate()
-    Collab->>DB: upsert TextDocument(ydocBase64,text)
-    Collab->>Board: apply object:update props.text
+    Collab->>DB: upsert TextDocument
+    Collab->>Board: object:update props.text
     Gateway-->>Client: text:yjs:accepted + board:event:accepted
     Gateway-->>Others: text:yjs:broadcast + board:event:broadcast
   end
 ```
 
-Soft lease xử lý tranh chấp edit text ở mức UX và backend guard. Yjs state được persist, nhưng UI hiện vẫn commit toàn text qua textarea; chưa phải editor CRDT multi-cursor per-character hoàn chỉnh.
+Backend persist Yjs state, nhưng UI hiện vẫn commit whole-text từ textarea; chưa phải editor CRDT per-character hoàn chỉnh.
 
-### 6.7 Version history và restore
+### 6.8 Version restore
 
 ```mermaid
 sequenceDiagram
-    participant ClientA
-    participant Backend
-    participant DB
-    participant ClientB
+  participant Owner
+  participant API as VersionHistoryController
+  participant Service as VersionHistoryService
+  participant DB
+  participant RT as RealtimeRoomEventsService
+  participant Clients
 
-    ClientA->>Backend: board:event
-    Backend->>DB: validate + apply event + write event log + update snapshot
-    Backend-->>ClientA: board:event:accepted
-    Backend-->>ClientB: board:event:broadcast
+  Owner->>API: POST /rooms/:roomId/versions/:version/restore
+  Service->>DB: replay BoardEvent <= targetVersion
+  Service->>DB: insert history.restore + update BoardState
+  Service->>RT: publishSnapshotRestored()
+  RT-->>Clients: board:snapshot:restored
+  API-->>Owner: restored snapshot
 ```
 
-### 8.4 Luồng reconnect và sync
+Client nhận restore sẽ thay snapshot, clear selection, pending history, undo/redo và optimistic markers.
 
-Khi client mất kết nối rồi reconnect:
-1. Client gửi `room:join` kèm `lastKnownVersion`.
-2. Backend kiểm tra khoảng cách giữa version hiện tại và version client biết.
-3. Nếu chênh lệch từ 0 đến 50 event thì trả delta events.
-4. Nếu không có `lastKnownVersion`, version âm, version lớn hơn server, hoặc chênh lệch hơn 50 event thì trả snapshot đầy đủ.
+## 7. Frontend design
 
-Đây là cơ chế rất quan trọng để client không cần load lại toàn bộ board mỗi lần reconnect.
+```mermaid
+flowchart TD
+  App --> AuthProvider
+  App --> DashboardPage
+  App --> RoomPage
+  RoomPage --> ApiClient
+  RoomPage --> useRoomRealtime
+  RoomPage --> BoardCanvas
+  BoardCanvas --> useBoardStore
+  useRoomRealtime --> useBoardStore
+  useRoomRealtime --> OfflineOutbox[(IndexedDB)]
+  useRoomRealtime --> SocketIO[Socket.IO client]
+```
 
-### 8.5 Luồng undo/redo
+### 7.1 AuthProvider
 
-Undo/redo được triển khai chủ yếu ở frontend:
-- Mỗi thao tác board tạo một `BoardHistoryEntry` có `undo` (inverse operation) và `redo` (original operation).
-- **Create → undo=delete**: Xóa object vừa tạo. Undo luôn gửi `object:delete` **không kèm expectedVersion** để tránh conflict sau nhiều thao tác trung gian.
-- **Update → undo=update (restore previous state)**: Gửi `object:update` với patch khôi phục giá trị cũ. ExpectedVersion bị xóa khỏi undo payload.
-- **Delete → undo=create**: Tạo lại object từ bản sao trước khi xóa.
-- Khi server ACK event, frontend gọi `completePendingHistory` để chuyển entry từ `undoStack` ↔ `redoStack`.
-- `pendingHistoryCount > 0` sẽ chặn undo/redo cho đến khi pending operation hoàn thành.
-- Undo/redo stack **không bị clear sau restore** — user có thể undo các thao tác trước khi restore.
-- Keyboard shortcuts: `Ctrl+Z` (undo), `Ctrl+Shift+Z` / `Ctrl+Y` (redo).
+- Refresh token lưu trong `sessionStorage` key `whiteboard.refreshToken`.
+- App mount sẽ refresh session nếu có refresh token.
+- `runWithAuth()` tự retry sau refresh nếu REST trả `401`.
 
-### 8.6 Luồng xóa room
+### 7.2 Dashboard
 
-- Owner chọn "Delete Room" trên Dashboard card → hiện confirmation dialog.
-- Xác nhận → `DELETE /rooms/:roomId` → room và tất cả dữ liệu liên quan (members, board state, events, comments) bị xóa cascade.
-- Room bị xóa khỏi danh sách hiển thị và toast notification hiện thông báo thành công.
+- Health check `/health`.
+- List/create/delete rooms.
+- Join by invite code.
+- Role badge và active/idle status theo `updatedAt`.
 
----
+### 7.3 RoomPage
 
-## 9. Cách tương tác giữa các module
+- Load room metadata + board snapshot bằng REST.
+- Bật `useRoomRealtime` sau khi room ready.
+- Presence/version panels đóng mặc định; comments panel mở mặc định.
+- Comments hiện là room-level list/input.
+- Conflict drawer hiện khi IndexedDB outbox có conflicted operation.
+- Version restore dùng REST response làm fallback và socket event cho realtime.
 
-### 9.1 Frontend ↔ Backend REST
+### 7.4 BoardCanvas
 
-Sử dụng `ApiClient` ở frontend để gọi các API REST:
-- auth APIs
-- room APIs
-- version history APIs
-- board snapshot APIs
+| Capability | Implementation |
+|---|---|
+| Draw | Rectangle/circle/line local draft rồi commit `object:create` |
+| Text create | Text tool mở input overlay rồi commit object text |
+| Text edit | Double-click text, claim lease, emit Yjs update |
+| Multi-select | Ctrl/Meta-click toggle; drag empty canvas tạo selection rect |
+| Transform | Konva `Transformer`, drag/resize/rotate emit `object:update` |
+| Delete | Delete/Backspace emit `object:delete` |
+| Remote awareness | Cursor labels, remote selection boxes, text lease label |
+| Comments leftovers | `BoardCanvas` vẫn có comment tool/pins props, nhưng `RoomPage` hiện không truyền comment pins/canvas target |
+| Shortcuts | Ctrl+Z, Ctrl+Y/Ctrl+Shift+Z, Ctrl+0, Ctrl+/- |
 
-Ví dụ:
-- DashboardPage gọi `listRooms`, `createRoom`, `joinByInviteCode`
-- RoomPage gọi `getRoom`, `getBoardSnapshot`, `getVersionHistory`
+## 8. API contracts
 
-Các endpoint REST chính đang có:
+### 8.1 REST endpoints
 
 | Method | Endpoint | Auth/Role | Purpose |
 |---|---|---|---|
-| `GET` | `/health` | Health check | Public |
-| `POST` | `/auth/register` | Tạo user mới, trả public user | Public |
-| `POST` | `/auth/login` | Đăng nhập, tạo access token và refresh token | Public |
-| `POST` | `/auth/refresh` | Rotate refresh token và cấp token mới | Public với refresh token hợp lệ |
-| `POST` | `/auth/logout` | Revoke refresh session | Public với refresh token hợp lệ |
-| `GET` | `/auth/me` | Lấy user hiện tại | JWT |
-| `GET` | `/rooms` | Danh sách room user tham gia | JWT |
-| `POST` | `/rooms` | Tạo room, tạo OWNER membership và board state version 0 | JWT |
-| `POST` | `/rooms/join` | Join room bằng invite code, mặc định role VIEWER | JWT |
-| `GET` | `/rooms/:roomId` | Lấy room nếu là member | JWT |
-| `PATCH` | `/rooms/:roomId` | Đổi tên room | OWNER |
-| `DELETE` | `/rooms/:roomId` | Xóa room | OWNER |
-| `GET` | `/rooms/:roomId/board` | Lấy board snapshot hiện tại | Member |
-| `GET` | `/rooms/:roomId/members` | Danh sách member | Member |
-| `POST` | `/rooms/:roomId/members` | Thêm member bằng userId | OWNER |
-| `PATCH` | `/rooms/:roomId/members/:userId` | Đổi role member | OWNER |
-| `DELETE` | `/rooms/:roomId/members/:userId` | Xóa member | OWNER |
-| `GET` | `/rooms/:roomId/versions` | Lịch sử version gần đây và tags | Member |
-| `POST` | `/rooms/:roomId/versions/tags` | Tạo checkpoint tag | EDITOR trở lên |
-| `GET` | `/rooms/:roomId/versions/:version` | Chi tiết một version | Member |
-| `POST` | `/rooms/:roomId/versions/:version/restore` | Restore board về version cũ | OWNER |
-| `GET` | `/rooms/:roomId/comments` | Danh sách comment trong room | Member |
-| `POST` | `/rooms/:roomId/comments` | Tạo comment (có thể gắn vào objectId hoặc x/y) | Member |
-| `PATCH` | `/rooms/:roomId/comments/:commentId` | Sửa body/resolved của comment | Author hoặc OWNER |
-| `DELETE` | `/rooms/:roomId/comments/:commentId` | Xóa comment | Author hoặc OWNER |
+| `GET` | `/health` | public | Health check |
+| `POST` | `/auth/register` | public | Create user |
+| `POST` | `/auth/login` | public | Login tokens |
+| `POST` | `/auth/refresh` | refresh token | Rotate tokens |
+| `POST` | `/auth/logout` | refresh token | Revoke session |
+| `GET` | `/auth/me` | JWT | Current user |
+| `GET` | `/rooms` | JWT | List joined rooms |
+| `POST` | `/rooms` | JWT | Create room |
+| `POST` | `/rooms/join` | JWT | Join invite as viewer |
+| `GET` | `/rooms/:roomId` | member | Room detail |
+| `PATCH` | `/rooms/:roomId` | owner | Rename room |
+| `DELETE` | `/rooms/:roomId` | owner | Delete room |
+| `GET` | `/rooms/:roomId/board` | member | Board snapshot |
+| `GET` | `/rooms/:roomId/members` | member | List members |
+| `POST` | `/rooms/:roomId/members` | owner | Add member |
+| `PATCH` | `/rooms/:roomId/members/:userId` | owner | Change role |
+| `DELETE` | `/rooms/:roomId/members/:userId` | owner | Remove member |
+| `GET` | `/rooms/:roomId/comments` | member | List comments |
+| `POST` | `/rooms/:roomId/comments` | member | Create comment and broadcast `comment:new` |
+| `PATCH` | `/rooms/:roomId/comments/:commentId` | author/owner | Edit body/resolved |
+| `DELETE` | `/rooms/:roomId/comments/:commentId` | author/owner | Delete comment |
+| `GET` | `/rooms/:roomId/versions` | member | Recent 50 events + tags |
+| `POST` | `/rooms/:roomId/versions/tags` | owner/editor | Tag version |
+| `GET` | `/rooms/:roomId/versions/:version` | member | Version detail |
+| `POST` | `/rooms/:roomId/versions/:version/restore` | owner | Restore snapshot |
 
-### 9.2 Frontend ↔ Backend Socket.IO
+### 8.2 Socket.IO events
 
-`useRoomRealtime` kết nối tới backend Socket.IO và handles:
-- `room:join`
-- `room:joined`
-- `board:event`
-- `board:event:accepted`
-- `board:event:broadcast`
-- `board:event:rejected`
-- `presence:update`
-- `shape:preview`
-
-Luồng Socket.IO thực tế:
-
-| Event | Chiều | Payload/ý nghĩa |
+| Event | Direction | Purpose |
 |---|---|---|
-| `room:join` | Client -> Server | `{ roomId, lastKnownVersion }`; kiểm tra membership rồi join channel `room:${roomId}` |
-| `room:joined` | Server -> Client | `{ role, users, syncMode, currentVersion, missedEvents? hoặc snapshot? }` |
-| `presence:update` | Server -> Room | Danh sách user online, gom nhiều socket theo user |
-| `board:event` | Client -> Server | `{ roomId, eventType, baseVersion, payload, clientOpId }` |
-| `board:event:accepted` | Server -> Sender | Event đã được ghi, kèm version mới |
-| `board:event:broadcast` | Server -> Other clients | Event đã được ghi để các client khác apply |
-| `board:event:rejected` | Server -> Sender | Lý do reject: unauthorized, forbidden, validation, conflict, not found |
-| `shape:preview` | Client -> Server -> Room | Preview transform tạm thời, không ghi DB (cần membership check) |
-| `cursor:update` | Client -> Server | `{ roomId, position }` — vị trí chuột, broadcast qua CollaborationService |
-| `selection:update` | Client -> Server | `{ roomId, objectIds, mode }` — object đang được chọn |
-| `text:lease:claim` | Client -> Server | Xin lease để edit text object (TTL 30s, renew 10s) |
-| `text:lease:release` | Client -> Server | Giải phóng lease khi edit xong |
-| `text:lease:update` | Server -> Room | Thông báo lease state mới cho tất cả client |
-| `text:lease:denied` | Server -> Sender | Lease bị từ chối (người khác đang giữ) |
-| `board:snapshot:restored` | Server -> Room | Phát khi có restore, client reload snapshot |
+| `room:join` | client -> server | Join room channel with `lastKnownVersion` |
+| `room:joined` | server -> client | Role, presence, delta/snapshot |
+| `room:error` | server -> client | App-level socket error |
+| `presence:update` | server -> room | Online users |
+| `board:event` | client -> server | Board create/update/delete |
+| `board:event:accepted` | server -> sender | Persisted board event |
+| `board:event:broadcast` | server -> others | Remote board event |
+| `board:event:rejected` | server -> sender | Validation/permission/conflict |
+| `board:snapshot:restored` | server -> room | Restore snapshot |
+| `cursor:update` | client -> server | Live cursor |
+| `cursor:broadcast` | server -> others | Remote cursor |
+| `cursor:remove` | server -> room | Remove cursor |
+| `selection:update` | client -> server | Selected/editing object ids |
+| `selection:broadcast` | server -> others | Remote selection |
+| `selection:remove` | server -> room | Remove selection |
+| `text:lease:claim` | client -> server | Claim text lease |
+| `text:lease:release` | client -> server | Release text lease |
+| `text:lease:update` | server -> room | Lease state |
+| `text:lease:denied` | server -> sender | Lease conflict |
+| `text:yjs:update` | client -> server | Text Yjs update |
+| `text:yjs:accepted` | server -> sender | Text accepted |
+| `text:yjs:broadcast` | server -> others | Remote text update |
+| `comment:new` | server -> room, client -> server supported | Realtime new room comment |
+| `shape:preview` | client -> room | Ephemeral transform preview |
 
-### 9.3 Backend internal module flow
+`comment:new` đang được gateway/client dùng nhưng chưa có trong `SocketEventName` của shared package.
 
-- `RoomGateway` nhận Socket.IO event.
-- `BoardService` xử lý board event và cập nhật state.
-- `PresenceService` cập nhật người online.
-- `PrismaService` lưu vào PostgreSQL.
-- `RoomMemberGuard` kiểm tra quyền tham gia room.
+## 9. Core workflows
 
-### 9.4 State flow trong frontend
+### 9.1 Room open
 
-- `RoomPage` tải snapshot ban đầu từ REST vào Zustand store.
-- `useRoomRealtime` nhận realtime event và dùng `applyAccepted...Event` để cập nhật store.
-- `BoardCanvas` render dữ liệu từ store và tạo local draft trong quá trình user vẽ.
-- `useBoardStore` là nguồn dữ liệu trung tâm cho canvas.
+```mermaid
+sequenceDiagram
+  participant User
+  participant RoomPage
+  participant REST
+  participant Store
+  participant RT as useRoomRealtime
+  participant Socket
 
----
-
-## 10. Thiết kế realtime và event sourcing
-
-### 10.1 Vì sao dùng event sourcing?
-
-Vì hệ thống cần:
-- ghi lại lịch sử thao tác
-- replay state cho client mới hoặc reconnect
-- hỗ trợ versioning và restore
-- duy trì tính nhất quán khi nhiều client chỉnh sửa cùng lúc
-
-### 10.2 Lifecycle của một board event
-
-1. Client tạo event payload.
-2. Gateway xác thực socket bằng JWT từ `handshake.auth.token` hoặc `Authorization` header.
-3. Backend kiểm tra membership và quyền mutate board (`OWNER` hoặc `EDITOR`).
-4. Backend kiểm tra board version.
-5. Backend áp dụng event vào snapshot.
-6. Backend ghi `BoardEvent` mới.
-7. Backend update `BoardState.version` và snapshot.
-8. Backend emit accepted cho sender và broadcast cho các client còn lại trong room.
-
-### 10.3 Optimistic concurrency
-
-Board service có logic kiểm tra:
-- `baseVersion`: kiểm tra version hiện tại của board trước khi apply event.
-- `expectedVersion`: khi update/delete object, kiểm tra version của object đó.
-
-Nếu sai, backend ném conflict error.
-
-Các event type board hiện được hỗ trợ:
-
-| Event type | Payload chính | Kết quả |
-|---|---|---|
-| `object:create` | `{ object: { id, type, x, y, rotation?, props?, metadata? } }` | Tạo object mới, version object bắt đầu từ 1 |
-| `object:update` | `{ objectId, expectedVersion?, patch }` | Merge `props`/`metadata`, cập nhật tọa độ/rotation và tăng version object |
-| `object:delete` | `{ objectId, expectedVersion? }` | Soft-delete object bằng `deleted: true` và tăng version object |
-
----
-
-## 11. Giao diện và trải nghiệm người dùng
-
-### 11.1 Dashboard
-- hiển thị danh sách phòng
-- cho phép tạo phòng
-- cho phép join bằng invite code
-- cho phép xóa phòng (chỉ owner)
-
-### 11.2 Room page
-- header room, role badge, trạng thái kết nối realtime
-- sidebar hiện presence và member management
-- canvas chính để vẽ và tương tác object
-- version history panel và tag creation
-
-### 11.3 UX patterns
-- **Toolbar nổi** bên trái canvas: Select, Rectangle, Circle, Line, Text, Pan
-- **Rubber-band selection**: Kéo chuột trên vùng trống (select mode) để chọn nhiều object
-- **Shift+Click**: Toggle từng object vào/tắt multi-select
-- **Transformer**: Resize/rotate object khi chọn, hiện 8 anchor handles
-- **Object Detail Panel**: Hiện bên phải khi chọn đúng 1 object, hiển thị: ID, type, x/y, rotation, width/height/radius, fill, stroke, strokeWidth, version, creator, updatedAt, nút Delete
-- **Toast notifications**: Góc phải dưới, 4 loại (success xanh, error đỏ, warning cam, info xanh dương), tự động biến mất sau 4 giây
-
-### 11.4 Keyboard shortcuts đầy đủ
-
-| Phím | Chức năng | Context |
-|---|---|---|
-| `Ctrl+Z` | Undo | Canvas |
-| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo | Canvas |
-| `Ctrl+=` | Zoom in | Canvas |
-| `Ctrl+-` | Zoom out | Canvas |
-| `Ctrl+0` | Reset zoom 100% | Canvas |
-| `Delete` / `Backspace` | Xóa object đang chọn | Canvas |
-| `Escape` | Bỏ chọn + về Select tool | Canvas |
-| `Shift+Click` | Toggle multi-select | Canvas |
-| `Enter` | Submit text input | Text mode |
-| Kéo chuột vùng trống | Rubber-band select | Select mode |
-
----
-
-## 12. Môi trường vận hành và cấu hình
-
-### Local development
-- Cài dependencies: `pnpm install`
-- Khởi động DB: `docker compose up -d postgres`
-- Chạy frontend/backend: `pnpm dev`
-
-### Ports mặc định
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:3000`
-- PostgreSQL: `5432`
-- Redis: `6379` (declared but not yet used in core flow)
-
-### Environment variables
-- `DATABASE_URL` — PostgreSQL connection string
-- `JWT_ACCESS_SECRET` — Secret key cho JWT signing
-- `JWT_ACCESS_TTL` — Thời hạn access token (mặc định `15m`)
-- `REFRESH_TOKEN_TTL_DAYS` — Thời hạn refresh token (mặc định `30`)
-- `CORS_ORIGIN` — CORS allowlist (mặc định `http://localhost:5173`)
-- `BACKEND_PORT` — Backend port (mặc định `3000`)
-- `FRONTEND_PORT` — Frontend dev server port (mặc định `5173`)
-
-### Docker deployment
-
-Backend có thể được build và chạy trong Docker:
-
-```bash
-# Build và chạy toàn bộ stack
-docker compose -f docker-compose.yml up -d --build
-
-# Chỉ chạy PostgreSQL
-docker compose up -d postgres
+  User->>RoomPage: open /rooms/:roomId
+  RoomPage->>REST: GET room + board snapshot + comments
+  REST-->>RoomPage: data
+  RoomPage->>Store: setBoardSnapshot()
+  RoomPage->>RT: enable room realtime
+  RT->>Socket: connect(auth token)
+  Socket->>Socket: room:join(lastKnownVersion)
+  Socket-->>RT: room:joined(delta/snapshot)
 ```
 
-**Dockerfile** (backend): Single-stage build với Node 22 Alpine:
-1. Copy workspace config + lockfile → `pnpm install`
-2. Copy source + Prisma schema → `prisma generate` + `nest build`
-3. Runtime: `prisma db push --accept-data-loss && node dist/main.js`
+### 9.2 Optimistic create and offline queue
 
-**docker-compose.yml services**:
-- `postgres`: PostgreSQL 16 Alpine, port 5432
-- `backend`: Build từ Dockerfile, port 3000, depends_on postgres (healthcheck)
-- `redis`: Redis 7 Alpine, port 6379 (optional, cho Socket.IO adapter)
+```mermaid
+sequenceDiagram
+  participant Canvas
+  participant RT as useRoomRealtime
+  participant Store
+  participant Outbox as IndexedDB
+  participant Gateway
 
-Lưu ý: Nếu backend local đang chạy trên port 3000, Docker container sẽ không thể bind port 3000. Tắt backend local trước khi `docker compose up`.
+  Canvas->>RT: send*Create(object)
+  RT->>RT: generate clientOpId + history entry
+  RT->>Store: add optimistic object version 0
+  alt socket joined
+    RT->>Gateway: board:event
+    Gateway-->>RT: board:event:accepted
+    RT->>Store: reconcile object
+  else offline
+    RT->>Outbox: enqueue operation
+  end
+```
 
----
+### 9.3 Offline conflict
 
-## 13. Testing hiện có
+```mermaid
+sequenceDiagram
+  participant RT as useRoomRealtime
+  participant Outbox as IndexedDB
+  participant Gateway
+  participant RoomPage
 
-Repository có test cho nhiều layer:
-- Backend (56 tests, 7 suites):
-  - `auth.controller.spec.ts`
-  - `board.service.spec.ts`
-  - `room-permissions.spec.ts`
-  - `room.gateway.spec.ts`
-  - `presence.service.spec.ts`
-  - `rooms.controller.spec.ts`
-  - `version-history.controller.spec.ts`
-- Frontend (20 tests, 4 suites):
-  - `BoardCanvas.test.ts`
-  - `boardStore.test.ts`
-  - `useRoomRealtime.test.ts`
-  - `versionHistory.test.ts`
-- Manual test scripts: `frontend/test/` chứa 8 script (collab-test, undo-test, undo-multi-test, full-flow-test, invite-test, debug-test, detail-test, quick-test, check-room)
+  RT->>Gateway: reconnect + room:join
+  RT->>Outbox: list pending operations
+  RT->>Gateway: replay board:event
+  alt accepted
+    Gateway-->>RT: board:event:accepted
+    RT->>Outbox: remove
+  else rejected
+    Gateway-->>RT: board:event:rejected
+    RT->>Outbox: mark conflicted
+    RT->>RoomPage: show conflict drawer
+  end
+```
 
-### Điểm mạnh của test suite
-- Đã có kiểm thử cho auth, board logic, guards, presence, version history và các service quan trọng.
-- Manual test scripts mô phỏng multi-client WebSocket scenarios (create/update/delete sync, undo/redo, restore, invite code, reconnect delta sync).
+### 9.4 Room comments realtime
 
-### Điểm còn thiếu
-- Undo/redo đã được fix (bỏ expectedVersion khỏi undo payload); nên bổ sung automated integration tests.
-- Chưa có Playwright/Cypress E2E tests chạy qua trình duyệt thật.
-- Offline queue IndexedDB tests chưa có.
+```mermaid
+sequenceDiagram
+  participant UserA
+  participant RoomPageA
+  participant CommentsAPI
+  participant DB
+  participant Gateway
+  participant RoomPageB
 
----
+  UserA->>RoomPageA: type room comment
+  RoomPageA->>CommentsAPI: POST /rooms/:roomId/comments {body}
+  CommentsAPI->>DB: insert Comment
+  CommentsAPI->>Gateway: broadcastToRoom(comment:new)
+  Gateway-->>RoomPageB: comment:new
+  RoomPageB->>RoomPageB: append if not duplicate
+  CommentsAPI-->>RoomPageA: CommentResponse
+```
 
-## 14. Điểm mạnh của hệ thống
+Creator also updates local list from REST response; `onCommentReceived` de-dupes by comment id.
 
-1. Kiến trúc rõ ràng giữa frontend/backend/shared.
-2. Dùng event sourcing cho board state, phù hợp với collaboration real-time.
-3. Có cơ chế auth và role-based permission rõ ràng.
-4. Realtime presence và room membership được thiết kế khá chặt chẽ.
-5. Có version history và restore cơ bản, tăng giá trị cho whiteboard.
-6. Dễ mở rộng thêm tính năng như cursor sharing, comments, locks, export/import.
+### 9.5 Restore
 
----
+```mermaid
+sequenceDiagram
+  participant Owner
+  participant REST
+  participant VersionHistoryService
+  participant DB
+  participant Socket
+  participant Clients
 
-## 15. Trạng thái các giới hạn đã rà soát
+  Owner->>REST: POST restore target version
+  VersionHistoryService->>DB: replay events to snapshot
+  VersionHistoryService->>DB: insert history.restore + update BoardState
+  VersionHistoryService->>Socket: board:snapshot:restored
+  Socket-->>Clients: restored snapshot
+  Clients->>Clients: clear undo/redo/selection/pending
+```
 
-### Đã xử lý
+## 10. Operations and configuration
 
-- **Undo/redo expectedVersion**: Đã bỏ expectedVersion khỏi undo payload → undo luôn thành công. Undo stack không bị clear sau restore.
-- **Type guard `isCreateBoardObjectPayload`**: Đã fix chấp nhận cả 4 loại shape (rectangle, circle, line, text).
-- **Multi-select**: Rubber-band selection + Shift+Click toggle. Dùng window-level mouse handler + refs để tránh stale closure.
-- **Keyboard shortcuts**: Ctrl+Z/Y, Delete, Ctrl+/-/0, Escape — dùng useRef cho callbacks để không bị stale.
-- **Member management**: Owner xem/sửa role/xóa member qua panel trong RoomPage.
-- **Invite code**: Tự động generate 8 ký tự khi tạo room. Join bằng code với role VIEWER mặc định (an toàn).
-- **Comments API**: CRUD đầy đủ với permission check (author hoặc owner mới được sửa/xóa).
-- **Docker build**: Dockerfile single-stage, docker-compose với PostgreSQL + Backend + Redis.
-- **Redis spam**: `lazyConnect: true` + `retryStrategy: () => null`.
-- **REST API endpoint table**: Đã đồng bộ tất cả 24 endpoints.
+```mermaid
+flowchart LR
+  Frontend[Vite localhost:5173]
+  HostBackend[localhost:3001]
+  Backend[backend container :3000]
+  Postgres[(postgres:5432)]
+  Redis[(redis:6379)]
+  Frontend --> HostBackend --> Backend
+  Backend --> Postgres
+  Backend --> Redis
+```
 
-### Còn cần cải thiện
+| Service | Host port | Container port |
+|---|---:|---:|
+| Frontend Vite | `5173` | local process |
+| Backend | `3001` | `3000` |
+| PostgreSQL | `5432` | `5432` |
+| Redis | `6380` | `6379` |
 
-- **Ownership transfer**: `rooms.service.ts` vẫn throw "not implemented".
-- **E2E tests**: Chưa có Playwright/Cypress. Manual test scripts đã cover multi-client scenarios.
-- **Offline outbox**: Operation replay dùng baseVersion cũ → có thể conflict khi object bị thay đổi bởi người khác trong lúc offline.
-- **Collaborative text**: Soft lease hoạt động nhưng chưa có live per-character editing bằng Yjs (TextDocument model đã có trong schema).
-- **`normalizeSnapshot`**: Silent drop invalid objects → che giấu lỗi schema migration/data corruption.
-- **WebSocket-only transport**: Đã bỏ `transports: ['websocket']` để Socket.IO tự fallback polling khi cần.
-- **Rate limiting**: Chưa có (chỉ có retryStrategy cho Redis).
+Important env vars: `DATABASE_URL`, `REDIS_URL`, `BACKEND_PORT`, `POSTGRES_*`, `REDIS_PORT`, `CORS_ORIGIN`, `VITE_API_BASE_URL`, `JWT_ACCESS_SECRET`, `JWT_ACCESS_TTL`, `REFRESH_TOKEN_TTL_DAYS`.
 
----
+Backend Dockerfile runs `prisma generate`, `nest build`, then starts with `prisma migrate deploy && node dist/main.js`.
 
-## 16. Kết luận
+## 11. Testing
 
-Repository này là một nền tảng whiteboard cộng tác thời gian thực khá đầy đủ về mặt kiến trúc và nghiệp vụ. Nó không chỉ là một demo UI đơn giản mà là một hệ thống có cấu trúc rõ ràng với:
+| Area | Files | Coverage focus |
+|---|---|---|
+| Auth | `backend/src/auth/auth.controller.spec.ts` | Register, login, refresh, logout, `/auth/me` |
+| Board | `backend/src/board/board.service.spec.ts` | Events, snapshot, reconnect sync, conflicts |
+| Permissions | `backend/src/permissions/room-permissions.spec.ts` | Role helpers |
+| Realtime | `backend/src/realtime/room.gateway.spec.ts` | Socket auth/join/presence/board/text lease |
+| Presence | `backend/src/realtime/presence.service.spec.ts` | Multi-socket presence |
+| Rooms | `backend/src/rooms/rooms.controller.spec.ts` | Room/member APIs |
+| Versions | `backend/src/rooms/version-history.controller.spec.ts` | Version/tag/detail APIs |
+| Board frontend | `frontend/src/board/*.test.ts` | Store and canvas helpers |
+| Realtime frontend | `frontend/src/realtime/useRoomRealtime.test.ts` | Helpers and conflict formatting |
+| Versions frontend | `frontend/src/versions/versionHistory.test.ts` | Display helpers |
 
-- auth và role management
-- realtime collaboration
-- event-sourced board state
-- room membership và presence
-- version history và restore
+Gaps: no automated browser E2E in package scripts, no dedicated comments controller/service spec, and no multi-client browser test for `comment:new`/restore/offline replay.
 
-Nếu tiếp tục phát triển, đây là một codebase rất phù hợp để mở rộng thêm các tính năng cao cấp như:
-- export board to image/PDF
-- ownership transfer và audit log nâng cao
-- live per-character collaborative text editing bằng Yjs
-- automated browser E2E tests cho nhiều client realtime
-- production hardening cho deploy nhiều node, metrics, tracing và rate limiting
+## 12. Feature status matrix
+
+| Feature | Status | Notes |
+|---|---|---|
+| Auth + refresh rotation | Complete | `RefreshSession` stores token hash |
+| Room CRUD + invite join | Complete | Invite join creates viewer |
+| Role-based permissions | Complete | REST + socket enforce roles |
+| Board event sourcing | Complete | Snapshot + append-only log |
+| Small change persistence | Complete | Board deltas stored as `BoardEvent` envelope and folded into `BoardState` |
+| Large reset persistence | Complete | Restore writes `history.restore` and broadcasts full snapshot |
+| Reconnect sync | Complete | Delta if <= 50 events |
+| Multi-cursor | Complete live state | TTL state, no history |
+| Remote selection | Complete live state | selected/editing modes |
+| Soft text lock | Complete | TTL lease, backend conflict |
+| Yjs text persistence | Implemented | UI still whole-text textarea |
+| Room comments realtime | Implemented | REST create broadcasts `comment:new` |
+| Object/canvas comment target | Schema/API supported | UI currently does not create targeted comments |
+| Offline outbox | Functional | IndexedDB pending/conflicted |
+| Conflict resolution | Functional for object update | Field-level merge for stale update |
+| Undo/redo | Functional client-side | ACK matched by `clientOpId` |
+| Restore version | Complete | Emits `board:snapshot:restored` |
+| Redis adapter | Implemented | Used when `REDIS_URL` exists |
+
+## 13. Known limitations and next work
+
+1. Add `comment:new` to `SocketEventName` in `packages/shared/src/index.ts` so shared contract matches gateway/client.
+2. Decide whether comments should remain room-level only or revive object/canvas annotation UI. Schema supports targets, but current RoomPage does not use them.
+3. Add realtime events for comment update/delete if resolved/delete should sync immediately across clients.
+4. Add browser E2E for multi-client board sync, comments, restore, cursor/selection, offline replay.
+5. Implement ownership transfer before allowing owner self-role-change/self-remove.
+6. Deepen collaborative text UI if true per-character Yjs editing is required.
+7. Harden production: rate limits, structured logs, metrics, tracing, readiness checks, stricter CORS/secret validation.
+
+## 14. Diagram coverage map
+
+| Chủ đề | Đã có hình vẽ ở mục | Còn thiếu |
+|---|---|---|
+| Runtime tổng thể | 3 | Không |
+| Domain model / database | 5 | Không |
+| Lưu thay đổi nhỏ/lớn/live/offline | 5.6 | Không |
+| Backend module graph | 6 | Không |
+| Auth + refresh rotation | 6.1 | Không |
+| Role guard / permission | 6.2 | Không |
+| Board event sourcing | 6.3 | Không |
+| Conflict resolution | 6.4 | Không |
+| Reconnect delta/snapshot | 6.5 | Không |
+| Redis-backed collaboration state | 6.6 | Không |
+| Text lease + Yjs persistence | 6.7 | Không |
+| Version restore realtime | 6.8 và 9.5 | Không |
+| Frontend component/data flow | 7 | Không |
+| Room open workflow | 9.1 | Không |
+| Optimistic create/offline queue | 9.2 | Không |
+| Offline conflict handling | 9.3 | Không |
+| Room comments realtime | 9.4 | Không |
+| Docker/local runtime | 10 | Không |
+
+Với trạng thái code hiện tại, report đã có sơ đồ cho các tính năng chính và các cơ chế quan trọng. Những phần không có sơ đồ riêng là các bảng API/test/status vì trình bày bằng bảng rõ hơn sơ đồ.
+
+## 15. Source-of-truth notes
+
+- `README.md` and `AGENTS.md` describe Docker backend + local frontend flow.
+- `CLAUDE.md` may contain older notes and should not be treated as current source of truth.
+- `frontend/.env.local` should set `VITE_API_BASE_URL=http://localhost:3001`.
