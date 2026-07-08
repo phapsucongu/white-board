@@ -33,6 +33,9 @@ model RefreshSession {
   id        String    @id @default(uuid())
   userId    String
   tokenHash String
+  // All sessions produced by rotating one login share a familyId. If a rotated-out
+  // (revoked) token is replayed, the whole family is revoked as a theft response.
+  familyId  String?
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime  @default(now())
@@ -40,6 +43,7 @@ model RefreshSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([familyId])
 }
 
 model Room {

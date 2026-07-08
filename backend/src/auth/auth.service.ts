@@ -7,7 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService, type JwtSignOptions } from '@nestjs/jwt';
 import type { User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { getAccessTokenSecret } from './jwt-secret';
@@ -92,8 +92,15 @@ export class AuthService {
       const stillMatches = await bcrypt.compare(parsedToken.secret, session.tokenHash);
 
       if (stillMatches && session.revokedAt) {
+        // Revoke the whole token family (fall back to all the user's live sessions for
+        // legacy rows created before familyId existed).
         await this.prisma.refreshSession.updateMany({
-          where: { userId: session.userId, revokedAt: null },
+          where: {
+            revokedAt: null,
+            ...(session.familyId
+              ? { familyId: session.familyId }
+              : { userId: session.userId })
+          },
           data: { revokedAt: new Date() }
         });
       }
@@ -126,6 +133,7 @@ export class AuthService {
         data: {
           userId: session.userId,
           tokenHash: nextTokenHash,
+          familyId: session.familyId ?? session.id,
           expiresAt
         }
       });
@@ -179,6 +187,7 @@ export class AuthService {
       data: {
         userId: user.id,
         tokenHash,
+        familyId: randomUUID(),
         expiresAt: this.getRefreshExpiresAt()
       }
     });

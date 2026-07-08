@@ -29,6 +29,7 @@ type RefreshSessionCreateArgs = {
   data: {
     userId: string;
     tokenHash: string;
+    familyId?: string;
     expiresAt: Date;
   };
 };
@@ -69,7 +70,7 @@ type PrismaMock = {
     update: jest.Mock<Promise<RefreshSession>, [RefreshSessionUpdateArgs]>;
     updateMany: jest.Mock<
       Promise<{ count: number }>,
-      [{ where: { userId: string; revokedAt: null }; data: { revokedAt: Date } }]
+      [{ where: { userId?: string; familyId?: string; revokedAt: null }; data: { revokedAt: Date } }]
     >;
   };
   $transaction: jest.Mock<Promise<RefreshSession>, [(tx: PrismaMock) => Promise<RefreshSession>]>;
@@ -112,6 +113,7 @@ function createPrismaMock(): PrismaMock {
           id: `session-${sessionCount}`,
           userId: data.userId,
           tokenHash: data.tokenHash,
+          familyId: data.familyId ?? null,
           expiresAt: data.expiresAt,
           revokedAt: null,
           createdAt: new Date()
@@ -149,7 +151,12 @@ function createPrismaMock(): PrismaMock {
         let count = 0;
 
         for (const session of refreshSessions) {
-          if (session.userId === where.userId && session.revokedAt === null) {
+          const matchesScope =
+            where.familyId !== undefined
+              ? session.familyId === where.familyId
+              : session.userId === where.userId;
+
+          if (matchesScope && session.revokedAt === null) {
             session.revokedAt = data.revokedAt;
             count += 1;
           }

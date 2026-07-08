@@ -357,6 +357,9 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
 
     const lease = this.collaboration.releaseTextLease(roomId, objectId, user.id);
+    // The editor is done — flush the debounced text board-event now so the final
+    // content is durable and broadcast without waiting out the debounce window.
+    void this.collaboration.flushTextBoardEvent(roomId, objectId, user.id);
     this.server.to(this.getRoomChannel(roomId)).emit('text:lease:update', {
       roomId,
       objectId,
@@ -400,20 +403,12 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         text: result.text,
         serverTime
       };
-      const boardPayload: BoardEventAcceptedPayload = {
-        roomId: result.boardEvent.roomId,
-        version: result.boardEvent.version,
-        eventType: result.boardEvent.eventType,
-        payload: result.boardEvent.payload,
-        actorId: result.boardEvent.actorId,
-        serverTime,
-        ...(result.boardEvent.clientOpId ? { clientOpId: result.boardEvent.clientOpId } : {})
-      };
 
+      // Live edits relay over Yjs every keystroke; the durable board-event is emitted
+      // (debounced) by CollaborationService via board:event:broadcast, so it is NOT
+      // emitted here per keystroke.
       client.emit('text:yjs:accepted', textPayload);
       client.to(this.getRoomChannel(roomId)).emit('text:yjs:broadcast', textPayload);
-      client.emit('board:event:accepted', boardPayload);
-      client.to(this.getRoomChannel(roomId)).emit('board:event:broadcast', boardPayload);
     } catch (error) {
       this.emitBoardEventRejected(client, {
         roomId,

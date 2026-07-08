@@ -4,10 +4,13 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  OnModuleDestroy,
   SetMetadata,
   type Type
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
+import Redis from 'ioredis';
 
 type HttpRequestLike = {
   method: string;
@@ -28,10 +31,10 @@ export type RateLimitOptions = {
 export const RATE_LIMIT_KEY = 'rateLimit';
 
 /**
- * Apply an in-memory, per-IP sliding-window rate limit to a route. Deliberately
- * dependency-free (no @nestjs/throttler) and single-instance only — good enough to
- * blunt password brute force / credential stuffing / invite-code enumeration on the
- * auth surface. For multi-instance deployments, back this with a shared store.
+ * Apply a per-IP fixed-window rate limit to a route. Backed by Redis when REDIS_URL is
+ * configured (so the limit holds across multiple backend instances), falling back to an
+ * in-memory window per instance otherwise. Blunts password brute force / credential
+ * stuffing / invite-code enumeration on the auth surface.
  */
 export const RateLimit = (options: RateLimitOptions) => SetMetadata(RATE_LIMIT_KEY, options);
 
@@ -41,12 +44,41 @@ type Hit = {
 };
 
 @Injectable()
-export class RateLimitGuard implements CanActivate {
+export class RateLimitGuard implements CanActivate, OnModuleDestroy {
   private readonly hits = new Map<string, Hit>();
+  private redis: Redis | null = null;
 
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly config: ConfigService
+  ) {
+    const redisUrl = this.config.get<string>('REDIS_URL');
 
-  canActivate(context: ExecutionContext): boolean {
+    if (redisUrl) {
+      const client = new Redis(redisUrl, {
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        retryStrategy: () => null
+      });
+      // Non-fatal: on any Redis error we fall back to the in-memory window.
+      client.on('error', () => undefined);
+      client
+        .connect()
+        .then(() => {
+          this.redis = client;
+        })
+        .catch(() => {
+          client.disconnect();
+          this.redis = null;
+        });
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.redis?.quit().catch(() => undefined);
+  }
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const options = this.reflector.getAllAndOverride<RateLimitOptions | undefined>(RATE_LIMIT_KEY, [
       context.getHandler(),
       context.getClass()
@@ -57,7 +89,39 @@ export class RateLimitGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest<HttpRequestLike>();
-    const key = `${this.resolveClientId(request)}:${request.method}:${request.route?.path ?? request.path}`;
+    const key = `ratelimit:${this.resolveClientId(request)}:${request.method}:${request.route?.path ?? request.path}`;
+
+    if (this.redis) {
+      try {
+        return await this.checkRedis(key, options);
+      } catch (error) {
+        // A rate-limit rejection must propagate; only a Redis failure falls back.
+        if (error instanceof HttpException) {
+          throw error;
+        }
+      }
+    }
+
+    return this.checkInMemory(key, options);
+  }
+
+  private async checkRedis(key: string, options: RateLimitOptions): Promise<boolean> {
+    const redis = this.redis as Redis;
+    const count = await redis.incr(key);
+
+    if (count === 1) {
+      await redis.pexpire(key, options.windowMs);
+    }
+
+    if (count > options.limit) {
+      const ttl = await redis.pttl(key);
+      this.reject(ttl > 0 ? ttl : options.windowMs);
+    }
+
+    return true;
+  }
+
+  private checkInMemory(key: string, options: RateLimitOptions): boolean {
     const now = Date.now();
     const existing = this.hits.get(key);
 
@@ -68,15 +132,21 @@ export class RateLimitGuard implements CanActivate {
     }
 
     if (existing.count >= options.limit) {
-      const retryAfter = Math.ceil((existing.resetAt - now) / 1000);
-      throw new HttpException(
-        { message: 'Too many requests, please try again later.', retryAfter },
-        HttpStatus.TOO_MANY_REQUESTS
-      );
+      this.reject(existing.resetAt - now);
     }
 
     existing.count += 1;
     return true;
+  }
+
+  private reject(retryAfterMs: number): never {
+    throw new HttpException(
+      {
+        message: 'Too many requests, please try again later.',
+        retryAfter: Math.ceil(retryAfterMs / 1000)
+      },
+      HttpStatus.TOO_MANY_REQUESTS
+    );
   }
 
   private resolveClientId(request: HttpRequestLike): string {
