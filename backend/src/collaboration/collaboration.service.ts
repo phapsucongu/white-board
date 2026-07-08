@@ -77,12 +77,21 @@ export class CollaborationService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.redisPub = new Redis(redisUrl, {
-      maxRetriesPerRequest: 1
+      maxRetriesPerRequest: 1,
+      lazyConnect: true,
+      retryStrategy: () => null // Don't retry - Redis is optional
     });
     this.redisSub = this.redisPub.duplicate();
 
     this.redisPub.on('error', (error) => {
-      this.logger.warn(`Redis collaboration connection failed: ${error.message}`);
+      this.logger.warn(`Redis collaboration unavailable (non-fatal): ${error.message}`);
+    });
+
+    // Attempt connection but don't block startup
+    this.redisPub.connect().catch(() => {
+      this.redisPub?.disconnect();
+      this.redisPub = null;
+      this.redisSub = null;
     });
   }
 

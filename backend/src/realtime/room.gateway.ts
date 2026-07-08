@@ -98,7 +98,7 @@ type BoardEventAcceptedPayload = {
 type BoardEventRejectedPayload = {
   roomId?: string;
   eventType?: BoardEventType;
-  reason: 'UNAUTHORIZED' | 'FORBIDDEN' | 'VALIDATION_ERROR' | 'VERSION_CONFLICT' | 'NOT_FOUND';
+  reason: 'UNAUTHORIZED' | 'FORBIDDEN' | 'VALIDATION_ERROR' | 'VERSION_CONFLICT' | 'NOT_FOUND' | 'TEXT_LEASE_CONFLICT';
   message: string;
   clientOpId?: string;
   details?: unknown;
@@ -586,11 +586,31 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
+  @SubscribeMessage('comment:new')
+  async handleCommentNew(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: { roomId?: unknown; comment?: unknown }
+  ): Promise<void> {
+    const user = client.data.user;
+    if (!user) return;
+
+    const roomId = typeof payload?.roomId === 'string' ? payload.roomId : null;
+    if (!roomId || !payload?.comment) return;
+
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) return;
+
+    client.to(this.getRoomChannel(roomId)).emit('comment:new', {
+      roomId,
+      comment: payload.comment
+    });
+  }
+
   @SubscribeMessage('shape:preview')
-  handleShapePreview(
+  async handleShapePreview(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() payload: { roomId?: unknown; objectId?: unknown; transform?: unknown }
-  ): void {
+  ): Promise<void> {
     const user = client.data.user;
     if (!user) return;
 
@@ -601,6 +621,10 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       : null;
 
     if (!roomId || !objectId || !transform) return;
+
+    // Verify room membership before broadcasting
+    const membership = await this.getRoomMembership(roomId, user.id);
+    if (!membership) return;
 
     // Broadcast preview to everyone in the room except sender
     client.to(this.getRoomChannel(roomId)).emit('shape:preview', {
@@ -764,6 +788,13 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   private getBoardEventRejectionReason(error: unknown): BoardEventRejectedPayload['reason'] {
     if (error instanceof ConflictException) {
+      const response = error.getResponse();
+      if (typeof response === 'object' && response !== null && 'reason' in response) {
+        const reason = (response as Record<string, unknown>).reason;
+        if (typeof reason === 'string' && reason === 'TEXT_LEASE_CONFLICT') {
+          return 'TEXT_LEASE_CONFLICT';
+        }
+      }
       return 'VERSION_CONFLICT';
     }
 
@@ -812,6 +843,10 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
 
     return undefined;
+  }
+
+  broadcastToRoom(roomId: string, event: string, payload: unknown): void {
+    this.server.to(this.getRoomChannel(roomId)).emit(event, payload);
   }
 
   private getRoomChannel(roomId: string): string {
