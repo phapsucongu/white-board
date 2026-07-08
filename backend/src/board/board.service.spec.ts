@@ -388,8 +388,52 @@ describe('BoardService', () => {
     expect(prisma.boardEvent.findMany).not.toHaveBeenCalled();
   });
 
-  it('rejects stale client base versions', async () => {
+  it('rebases stale creates of new objects instead of rejecting them', async () => {
     const prisma = createPrismaMock(createBoardState('room-a', 2));
+    const service = new BoardService(prisma as unknown as PrismaService);
+
+    // A create of a brand-new object id does not conflict with concurrent edits to
+    // other objects, so a slightly stale baseVersion should be rebased and applied.
+    await expect(
+      service.applyBoardEvent({
+        roomId: 'room-a',
+        actorId: 'user-1',
+        eventType: 'object:create',
+        baseVersion: 1,
+        payload: {
+          object: {
+            id: 'object-1',
+            type: 'line',
+            x: 1,
+            y: 2
+          }
+        }
+      })
+    ).resolves.toMatchObject({ version: 3 });
+    expect(prisma.boardEvent.create).toHaveBeenCalled();
+  });
+
+  it('rejects stale creates that collide with an existing object id', async () => {
+    const snapshot: BoardSnapshot = {
+      objects: {
+        'object-1': {
+          id: 'object-1',
+          roomId: 'room-a',
+          type: 'circle',
+          x: 3,
+          y: 4,
+          rotation: 0,
+          version: 1,
+          createdBy: 'user-1',
+          updatedBy: 'user-1',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          deleted: false,
+          props: { radius: 8 }
+        }
+      }
+    };
+    const prisma = createPrismaMock(createBoardState('room-a', 2, snapshot));
     const service = new BoardService(prisma as unknown as PrismaService);
 
     await expect(

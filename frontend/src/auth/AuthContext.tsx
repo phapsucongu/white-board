@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode
 } from 'react';
@@ -53,27 +54,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStatus('authenticated');
   }, []);
 
-  const refreshSession = useCallback(async (): Promise<string | null> => {
-    const refreshToken = getStoredRefreshToken();
+  // Deduplicate concurrent refreshes: the backend rotates (single-use) refresh
+  // tokens, so if several requests 401 at once and each refreshes independently, the
+  // first invalidates the stored token and the rest fail — logging the user out
+  // despite a valid session. Share one in-flight refresh across all callers.
+  const inFlightRefresh = useRef<Promise<string | null> | null>(null);
 
-    if (!refreshToken) {
-      clearAuthState();
-      return null;
+  const refreshSession = useCallback((): Promise<string | null> => {
+    if (inFlightRefresh.current) {
+      return inFlightRefresh.current;
     }
 
-    try {
-      const authResponse = await apiClient.refresh(refreshToken);
-      setAccessToken(authResponse.accessToken);
-      storeRefreshToken(authResponse.refreshToken);
-      const currentUser = await apiClient.me(authResponse.accessToken);
-      setUser(currentUser);
-      setStatus('authenticated');
+    const run = (async (): Promise<string | null> => {
+      const refreshToken = getStoredRefreshToken();
 
-      return authResponse.accessToken;
-    } catch {
-      clearAuthState();
-      return null;
-    }
+      if (!refreshToken) {
+        clearAuthState();
+        return null;
+      }
+
+      try {
+        const authResponse = await apiClient.refresh(refreshToken);
+        setAccessToken(authResponse.accessToken);
+        storeRefreshToken(authResponse.refreshToken);
+        const currentUser = await apiClient.me(authResponse.accessToken);
+        setUser(currentUser);
+        setStatus('authenticated');
+
+        return authResponse.accessToken;
+      } catch {
+        clearAuthState();
+        return null;
+      } finally {
+        inFlightRefresh.current = null;
+      }
+    })();
+
+    inFlightRefresh.current = run;
+    return run;
   }, [clearAuthState]);
 
   const getMe = useCallback(async (): Promise<AuthUser | null> => {

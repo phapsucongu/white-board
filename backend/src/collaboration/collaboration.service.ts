@@ -60,6 +60,11 @@ export class CollaborationService implements OnModuleInit, OnModuleDestroy {
   private readonly cursorsBySocket = new Map<string, LiveCursor>();
   private readonly leasesByObject = new Map<string, TextLease>();
   private readonly selectionsBySocket = new Map<string, RemoteObjectSelection>();
+  // Serializes the read-modify-write of each text document so concurrent updates for
+  // the same object (e.g. the same user in two tabs) can't clobber each other via a
+  // last-write-wins overwrite. NOTE: single-instance only — multi-instance needs a
+  // shared (Redis/DB) lock.
+  private readonly textUpdateChains = new Map<string, Promise<unknown>>();
   private redisPub: Redis | null = null;
   private redisSub: Redis | null = null;
 
@@ -69,30 +74,41 @@ export class CollaborationService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService
   ) {}
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
     const redisUrl = this.config.get<string>('REDIS_URL');
 
     if (!redisUrl) {
       return;
     }
 
-    this.redisPub = new Redis(redisUrl, {
+    const pub = new Redis(redisUrl, {
       maxRetriesPerRequest: 1,
       lazyConnect: true,
       retryStrategy: () => null // Don't retry - Redis is optional
     });
-    this.redisSub = this.redisPub.duplicate();
+    const sub = pub.duplicate();
 
-    this.redisPub.on('error', (error) => {
+    // Both connections MUST have an 'error' listener: an unhandled 'error' event on
+    // an ioredis client (e.g. Redis drops after startup) would otherwise crash the
+    // whole process, taking down every room — not just collaboration.
+    const onError = (error: Error) => {
       this.logger.warn(`Redis collaboration unavailable (non-fatal): ${error.message}`);
-    });
+    };
+    pub.on('error', onError);
+    sub.on('error', onError);
 
-    // Attempt connection but don't block startup
-    this.redisPub.connect().catch(() => {
-      this.redisPub?.disconnect();
+    // Await both connections before exposing the clients, so attachSocketAdapter()
+    // never wires the Socket.IO adapter to a half-open / already-failed connection.
+    try {
+      await Promise.all([pub.connect(), sub.connect()]);
+      this.redisPub = pub;
+      this.redisSub = sub;
+    } catch {
+      pub.disconnect();
+      sub.disconnect();
       this.redisPub = null;
       this.redisSub = null;
-    });
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -262,6 +278,33 @@ export class CollaborationService implements OnModuleInit, OnModuleDestroy {
   }
 
   async applyTextUpdate(input: {
+    roomId: string;
+    objectId: string;
+    actorId: string;
+    updateBase64: string;
+  }): Promise<TextUpdateResult> {
+    return this.runExclusiveForObject(`${input.roomId}:${input.objectId}`, () =>
+      this.applyTextUpdateLocked(input)
+    );
+  }
+
+  private runExclusiveForObject<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.textUpdateChains.get(key) ?? Promise.resolve();
+    const run = previous.then(() => task());
+    const tail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    tail.finally(() => {
+      if (this.textUpdateChains.get(key) === tail) {
+        this.textUpdateChains.delete(key);
+      }
+    });
+    this.textUpdateChains.set(key, tail);
+    return run;
+  }
+
+  private async applyTextUpdateLocked(input: {
     roomId: string;
     objectId: string;
     actorId: string;

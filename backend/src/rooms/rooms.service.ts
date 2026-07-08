@@ -323,5 +323,9 @@ export class RoomsService {
 }
 
 function generateInviteCode(): string {
-  return randomBytes(4).toString('base64url').toUpperCase().slice(0, 8);
+  // 16 random bytes (128 bits) as a case-sensitive base64url string. The previous
+  // 32-bit, uppercased, 8-char code was brute-forceable against the (unauthenticated
+  // membership-granting) join route. Do NOT uppercase — that collapses the alphabet
+  // and throws away entropy.
+  return randomBytes(16).toString('base64url');
 }

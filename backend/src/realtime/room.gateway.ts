@@ -19,6 +19,7 @@ import {
 import { RoomRole } from '@prisma/client';
 import type { Server, Socket } from 'socket.io';
 import type { AccessTokenPayload } from '../auth/types';
+import { getAccessTokenSecret } from '../auth/jwt-secret';
 import {
   BOARD_EVENT_TYPES,
   BoardService,
@@ -111,7 +112,7 @@ type SocketErrorPayload = {
 
 const defaultSocketCorsOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
-function getSocketCorsOrigins(): string[] | boolean {
+function getSocketCorsOrigins(): string[] {
   const configuredOrigin = process.env.CORS_ORIGIN;
 
   if (!configuredOrigin) {
@@ -123,7 +124,9 @@ function getSocketCorsOrigins(): string[] | boolean {
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-  return origins.length > 0 ? origins : true;
+  // Never fall back to `true` (reflect any origin) on a misconfigured/empty list —
+  // a stray "CORS_ORIGIN=," would otherwise open the gateway to every origin.
+  return origins.length > 0 ? origins : defaultSocketCorsOrigins;
 }
 
 @WebSocketGateway({
@@ -854,6 +857,6 @@ export class RoomGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   private getAccessSecret(): string {
-    return this.config.get<string>('JWT_ACCESS_SECRET') ?? 'dev-access-secret-change-me';
+    return getAccessTokenSecret(this.config);
   }
 }

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional
 } from '@nestjs/common';
@@ -111,6 +112,8 @@ export type BoardSyncResult =
 
 @Injectable()
 export class BoardService {
+  private readonly logger = new Logger(BoardService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Optional()
@@ -205,14 +208,49 @@ export class BoardService {
   }
 
   async applyBoardEvent(input: ApplyBoardEventInput): Promise<ApplyBoardEventResult> {
-    return this.prisma.$transaction(async (tx) => {
+    const MAX_ATTEMPTS = 5;
+
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        // Serializable isolation makes the read-modify-write of BoardState.version
+        // atomic against concurrent editors. Without it (Read Committed) two events
+        // read the same version and race to write version N+1.
+        return await this.prisma.$transaction((tx) => this.applyBoardEventTx(tx, input), {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+        });
+      } catch (error) {
+        // A duplicate of the same client operation lost the unique race — return the
+        // already-applied result idempotently instead of a spurious rejection.
+        if (input.clientOpId && this.isUniqueConstraintError(error)) {
+          const existing = await this.findExistingClientOp(input.roomId, input.clientOpId);
+          if (existing) {
+            return existing;
+          }
+        }
+
+        if (this.isRetryableTransactionError(error) && attempt < MAX_ATTEMPTS) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  private async applyBoardEventTx(
+    tx: Prisma.TransactionClient,
+    input: ApplyBoardEventInput
+  ): Promise<ApplyBoardEventResult> {
+    {
       const currentState = await tx.boardState.findUnique({
         where: {
           roomId: input.roomId
         }
       });
       const currentVersion = currentState?.version ?? 0;
-      const currentSnapshot = this.normalizeSnapshot(currentState?.snapshotJson);
+      const currentSnapshot = this.normalizeSnapshot(currentState?.snapshotJson, {
+        preserveInvalid: true
+      });
       let eventInput = input;
 
       if (input.clientOpId) {
@@ -301,7 +339,47 @@ export class BoardService {
         snapshot: nextSnapshot,
         clientOpId: eventInput.clientOpId
       };
-    });
+    }
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+  }
+
+  private isRetryableTransactionError(error: unknown): boolean {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      // P2002: unique-constraint race (e.g. two events grabbing the same version).
+      // P2034: transaction write conflict / deadlock under Serializable — safe to retry.
+      return error.code === 'P2002' || error.code === 'P2034';
+    }
+    return false;
+  }
+
+  private async findExistingClientOp(
+    roomId: RoomId,
+    clientOpId: string
+  ): Promise<ApplyBoardEventResult | null> {
+    const [existingEvent, currentState] = await Promise.all([
+      this.prisma.boardEvent.findFirst({ where: { roomId, clientOpId } }),
+      this.prisma.boardState.findUnique({ where: { roomId } })
+    ]);
+
+    if (!existingEvent) {
+      return null;
+    }
+
+    return {
+      roomId,
+      version: existingEvent.version,
+      eventType: existingEvent.eventType as BoardEventType,
+      payload: decodeBoardEventPayload(
+        existingEvent.eventType,
+        existingEvent.payloadJson
+      ) as ApplyBoardEventInput['payload'],
+      actorId: existingEvent.actorId,
+      snapshot: this.normalizeSnapshot(currentState?.snapshotJson, { preserveInvalid: true }),
+      clientOpId: existingEvent.clientOpId ?? undefined
+    };
   }
 
   applyEventToSnapshot(
@@ -506,7 +584,10 @@ export class BoardService {
     };
   }
 
-  private normalizeSnapshot(snapshot: unknown): BoardSnapshot {
+  private normalizeSnapshot(
+    snapshot: unknown,
+    options: { preserveInvalid?: boolean } = {}
+  ): BoardSnapshot {
     if (!this.isRecord(snapshot) || !this.isRecord(snapshot.objects)) {
       return {
         objects: {}
@@ -522,6 +603,12 @@ export class BoardService {
           props: { ...object.props },
           metadata: object.metadata ? { ...object.metadata } : undefined
         };
+      } else if (options.preserveInvalid) {
+        // On the persist path we must NOT silently drop objects that fail validation
+        // (schema drift, partial write) — dropping here would permanently delete them
+        // from the snapshot on the very next event. Keep them verbatim and warn.
+        this.logger.warn(`Preserving unrecognized board object "${objectId}" in snapshot`);
+        objects[objectId] = object as unknown as BoardObject;
       }
     }
 

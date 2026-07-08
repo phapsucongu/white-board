@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { RateLimit } from '../common/rate-limit.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import type { AuthenticatedRequest } from '../auth/types';
 import { BoardService } from '../board/board.service';
@@ -30,6 +31,7 @@ export class RoomsController {
   }
 
   @Post('join')
+  @RateLimit({ limit: 10, windowMs: 60_000 })
   joinByCode(
     @Req() request: AuthenticatedRequest,
     @Body('inviteCode') inviteCode: string
@@ -37,7 +39,7 @@ export class RoomsController {
     if (!inviteCode || typeof inviteCode !== 'string') {
       throw new BadRequestException('inviteCode is required');
     }
-    return this.roomsService.joinByInviteCode(inviteCode.trim().toUpperCase(), request.user.id);
+    return this.roomsService.joinByInviteCode(inviteCode.trim(), request.user.id);
   }
 
   @Get(':roomId/members')

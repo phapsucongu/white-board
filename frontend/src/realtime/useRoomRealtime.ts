@@ -282,6 +282,13 @@ export function useRoomRealtime({
   const optimisticCreatesRef = useRef<Map<string, BoardObjectId>>(new Map());
   const pendingHistoryRef = useRef<PendingHistoryIntent[]>([]);
   const previewTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Keep the latest access token / comment callback in refs so a silent token
+  // refresh (or a changed callback identity) does NOT re-run the socket effect and
+  // tear down the connection + undo/redo state. See the socket effect below.
+  const accessTokenRef = useRef<string | null>(accessToken);
+  accessTokenRef.current = accessToken;
+  const onCommentReceivedRef = useRef(onCommentReceived);
+  onCommentReceivedRef.current = onCommentReceived;
   const [error, setError] = useState<string | null>(null);
   const [lastSnapshotRestore, setLastSnapshotRestore] =
     useState<BoardSnapshotRestoredPayload | null>(null);
@@ -354,6 +361,16 @@ export function useRoomRealtime({
         optimisticCreatesRef.current.set(request.clientOpId, optimisticObject.id);
       }
 
+      // Register undo/redo history for BOTH the online and offline paths, keyed on
+      // clientOpId. When an offline op later replays and is accepted, the accepted
+      // handler completes this pending entry — so offline-created ops remain undoable.
+      if (pendingHistory) {
+        enqueuePendingHistory({
+          ...pendingHistory,
+          clientOpId: request.clientOpId
+        });
+      }
+
       if (!socket || !roomId || status !== 'joined') {
         enqueueOfflineOperation({
           id: request.clientOpId,
@@ -369,19 +386,14 @@ export function useRoomRealtime({
         return true;
       }
 
-      if (pendingHistory) {
-        enqueuePendingHistory({
-          ...pendingHistory,
-          clientOpId: request.clientOpId
-        });
-      }
-
       socket.emit('board:event', request);
 
       return true;
     },
     [addObject, currentUserId, enqueuePendingHistory, roomId, status]
   );
+
+  const hasAccessToken = Boolean(accessToken);
 
   useEffect(() => {
     if (!enabled || !accessToken || !roomId) {
@@ -417,12 +429,15 @@ export function useRoomRealtime({
 
     const socket = io(env.apiBaseUrl, {
       auth: {
-        token: accessToken
+        token: accessTokenRef.current
       },
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
+      // Clear any lingering 'error' status from a previous connect_error while
+      // Socket.IO auto-reconnects; room:joined will promote this to 'joined'.
+      setStatus('connecting');
       socket.emit('room:join', {
         roomId,
         lastKnownVersion: useBoardStore.getState().boardVersion
@@ -543,7 +558,7 @@ export function useRoomRealtime({
 
     socket.on('comment:new', (payload: { roomId: string; comment: { id: string; body: string; x?: number | null; y?: number | null; objectId?: string | null; authorId: string; createdAt: string } }) => {
       if (payload.roomId !== roomId) return;
-      onCommentReceived?.(payload.comment);
+      onCommentReceivedRef.current?.(payload.comment);
     });
 
     socket.on('shape:preview', (payload: ShapePreview) => {
@@ -614,7 +629,9 @@ export function useRoomRealtime({
       }
     };
   }, [
-    accessToken,
+    // NOTE: depend on the PRESENCE of a token (falsy↔truthy), not its value, so a
+    // silent token rotation doesn't tear down the socket and wipe undo/redo state.
+    hasAccessToken,
     applyAcceptedCreateEvent,
     applyAcceptedDeleteEvent,
     applyAcceptedUpdateEvent,
@@ -627,6 +644,15 @@ export function useRoomRealtime({
     setBoardSnapshot,
     setBoardVersion
   ]);
+
+  // Keep the live socket's auth token current across silent refreshes so any
+  // Socket.IO auto-reconnect handshake uses a fresh (non-expired) token.
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (socket) {
+      socket.auth = { token: accessToken };
+    }
+  }, [accessToken]);
 
   useEffect(() => {
     if (status !== 'joined') return;
@@ -1008,7 +1034,15 @@ async function replayOfflineOutbox(
   setOfflineQueueCount(operations.length);
 
   for (const operation of operations) {
-    socket.emit(operation.eventName, operation.payload);
+    // Rebase the queued op onto the CURRENT board version. The baseVersion captured
+    // while offline is stale after reconnect (room:joined advanced boardVersion), so
+    // replaying it verbatim would be falsely rejected as a VERSION_CONFLICT even when
+    // nothing actually conflicts.
+    const payload =
+      operation.payload && typeof operation.payload === 'object'
+        ? { ...(operation.payload as Record<string, unknown>), baseVersion: useBoardStore.getState().boardVersion }
+        : operation.payload;
+    socket.emit(operation.eventName, payload);
   }
 }
 

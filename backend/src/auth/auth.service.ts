@@ -5,11 +5,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService, type JwtSignOptions } from '@nestjs/jwt';
-import type { RefreshSession, User } from '@prisma/client';
+import type { User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
+import { getAccessTokenSecret } from './jwt-secret';
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
 import type {
@@ -21,10 +22,6 @@ import type {
 type ParsedRefreshToken = {
   sessionId: string;
   secret: string;
-};
-
-type RefreshSessionWithUser = RefreshSession & {
-  user: User;
 };
 
 @Injectable()
@@ -83,7 +80,24 @@ export class AuthService {
       }
     });
 
-    if (!this.isSessionUsable(session)) {
+    if (!session) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    // Reuse detection: a token whose secret still matches a session we already
+    // revoked means an old (rotated-out) token is being replayed — a strong signal
+    // the token was stolen. Revoke the entire session family for that user so the
+    // attacker's descendant session is invalidated too.
+    if (session.revokedAt || session.expiresAt.getTime() <= Date.now()) {
+      const stillMatches = await bcrypt.compare(parsedToken.secret, session.tokenHash);
+
+      if (stillMatches && session.revokedAt) {
+        await this.prisma.refreshSession.updateMany({
+          where: { userId: session.userId, revokedAt: null },
+          data: { revokedAt: new Date() }
+        });
+      }
+
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -210,7 +224,7 @@ export class AuthService {
   }
 
   private getAccessSecret(): string {
-    return this.config.get<string>('JWT_ACCESS_SECRET') ?? 'dev-access-secret-change-me';
+    return getAccessTokenSecret(this.config);
   }
 
   private getAccessTokenTtl(): JwtSignOptions['expiresIn'] {
@@ -223,9 +237,5 @@ export class AuthService {
     expiresAt.setDate(expiresAt.getDate() + ttlDays);
 
     return expiresAt;
-  }
-
-  private isSessionUsable(session: RefreshSessionWithUser | null): session is RefreshSessionWithUser {
-    return Boolean(session && !session.revokedAt && session.expiresAt.getTime() > Date.now());
   }
 }

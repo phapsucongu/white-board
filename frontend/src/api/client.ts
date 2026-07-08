@@ -158,7 +158,14 @@ async function apiRequest<T>(path: string, options: RequestOptions = {}): Promis
     throw new ApiError(await readErrorMessage(response), response.status);
   }
 
-  return (await response.json()) as T;
+  // A 204 No Content (or otherwise empty body) has no JSON to parse — calling
+  // response.json() on it throws and would surface a successful request as an error.
+  if (response.status === 204 || response.headers.get('Content-Length') === '0') {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 async function readErrorMessage(response: Response): Promise<string> {

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { RateLimit } from '../common/rate-limit.guard';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -16,16 +17,19 @@ export class AuthController {
   ) {}
 
   @Post('register')
+  @RateLimit({ limit: 10, windowMs: 60_000 })
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
   @Post('login')
+  @RateLimit({ limit: 10, windowMs: 60_000 })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
 
   @Post('refresh')
+  @RateLimit({ limit: 30, windowMs: 60_000 })
   refresh(@Body() dto: RefreshTokenDto) {
     return this.authService.refresh(dto.refreshToken);
   }

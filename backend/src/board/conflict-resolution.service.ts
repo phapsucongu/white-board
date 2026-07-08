@@ -49,6 +49,18 @@ export class ConflictResolutionService {
       });
     }
 
+    // A create of a brand-new object id never actually conflicts with concurrent
+    // edits to other objects — only reject if that id already exists.
+    if (input.eventType === 'object:create') {
+      return this.resolveStaleCreate({ currentSnapshot, currentVersion, input, missedEvents });
+    }
+
+    // A delete can be rebased onto the current version: it wins over concurrent
+    // updates. Only reject if the object is already gone.
+    if (input.eventType === 'object:delete') {
+      return this.resolveStaleDelete({ currentSnapshot, currentVersion, input });
+    }
+
     if (input.eventType !== 'object:update' || !this.isUpdatePayload(input.payload)) {
       throw new BoardConflictException({
         currentVersion,
@@ -119,6 +131,86 @@ export class ConflictResolutionService {
       });
     }
 
+    return {
+      ...input,
+      payload: {
+        ...input.payload,
+        expectedVersion: undefined
+      }
+    };
+  }
+
+  private resolveStaleCreate({
+    currentSnapshot,
+    currentVersion,
+    input,
+    missedEvents
+  }: {
+    currentSnapshot: BoardSnapshot;
+    currentVersion: number;
+    input: ApplyBoardEventInput;
+    missedEvents: PrismaBoardEvent[];
+  }): ApplyBoardEventInput {
+    if (!this.isCreatePayload(input.payload)) {
+      throw new BoardConflictException({ currentVersion, conflictingFields: ['board.version'] });
+    }
+
+    const objectId = input.payload.object.id;
+    const alreadyExists = Boolean(currentSnapshot.objects[objectId]);
+    const missedTouchedSameId = missedEvents.some(
+      (missedEvent) =>
+        this.isBoardObjectEventType(missedEvent.eventType) &&
+        this.touchesObject(
+          missedEvent.eventType as BoardEventType,
+          decodeBoardEventPayload(missedEvent.eventType, missedEvent.payloadJson),
+          objectId
+        )
+    );
+
+    if (alreadyExists || missedTouchedSameId) {
+      throw new BoardConflictException(
+        {
+          currentVersion,
+          objectId,
+          conflictingFields: ['object.identity'],
+          currentObject: currentSnapshot.objects[objectId] ?? null
+        },
+        'Board object already exists'
+      );
+    }
+
+    return input;
+  }
+
+  private resolveStaleDelete({
+    currentSnapshot,
+    currentVersion,
+    input
+  }: {
+    currentSnapshot: BoardSnapshot;
+    currentVersion: number;
+    input: ApplyBoardEventInput;
+  }): ApplyBoardEventInput {
+    if (!this.isObjectPayload(input.payload)) {
+      throw new BoardConflictException({ currentVersion, conflictingFields: ['board.version'] });
+    }
+
+    const objectId = input.payload.objectId;
+    const currentObject = currentSnapshot.objects[objectId] ?? null;
+
+    if (!currentObject || currentObject.deleted) {
+      throw new BoardConflictException(
+        {
+          currentVersion,
+          objectId,
+          conflictingFields: ['object.deleted'],
+          currentObject
+        },
+        'Board object was already removed'
+      );
+    }
+
+    // Drop the stale expectedVersion so the delete applies to the current object.
     return {
       ...input,
       payload: {

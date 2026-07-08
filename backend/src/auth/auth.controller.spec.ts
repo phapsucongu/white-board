@@ -67,6 +67,10 @@ type PrismaMock = {
       [RefreshSessionFindUniqueArgs]
     >;
     update: jest.Mock<Promise<RefreshSession>, [RefreshSessionUpdateArgs]>;
+    updateMany: jest.Mock<
+      Promise<{ count: number }>,
+      [{ where: { userId: string; revokedAt: null }; data: { revokedAt: Date } }]
+    >;
   };
   $transaction: jest.Mock<Promise<RefreshSession>, [(tx: PrismaMock) => Promise<RefreshSession>]>;
 };
@@ -140,6 +144,18 @@ function createPrismaMock(): PrismaMock {
         }
 
         return session;
+      }),
+      updateMany: jest.fn(async ({ where, data }) => {
+        let count = 0;
+
+        for (const session of refreshSessions) {
+          if (session.userId === where.userId && session.revokedAt === null) {
+            session.revokedAt = data.revokedAt;
+            count += 1;
+          }
+        }
+
+        return { count };
       })
     },
     $transaction: jest.fn((callback: (tx: PrismaMock) => Promise<RefreshSession>) => callback(prisma))
