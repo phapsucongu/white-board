@@ -15,6 +15,12 @@ export function getTagsForVersion(tags: VersionTag[], version: number): VersionT
   return tags.filter((tag) => tag.version === version);
 }
 
-export function getVersionActorLabel(event: BoardVersionEvent): string {
-  return event.actorId;
+export function getVersionActorLabel(
+  event: BoardVersionEvent,
+  currentUser?: { id: string; displayName: string | null } | null
+): string {
+  if (currentUser && event.actorId === currentUser.id) {
+    return currentUser.displayName || 'You';
+  }
+  return event.actorId.slice(0, 8);
 }

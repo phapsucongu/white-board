@@ -10,6 +10,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RoomMemberGuard } from '../permissions/room-member.guard';
 import { BoardService } from '../board/board.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RoomGateway } from '../realtime/room.gateway';
 import { UsersService } from '../users/users.service';
 import { VersionHistoryController } from './version-history.controller';
 import { VersionHistoryService } from './version-history.service';
@@ -323,6 +324,10 @@ describe('VersionHistoryController', () => {
       controllers: [VersionHistoryController],
       providers: [
         BoardService,
+        {
+          provide: RoomGateway,
+          useValue: { broadcastToRoom: () => {} }
+        },
         JwtAuthGuard,
         Reflector,
         RoomMemberGuard,

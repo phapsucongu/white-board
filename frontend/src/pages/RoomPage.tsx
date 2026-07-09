@@ -40,6 +40,7 @@ export function RoomPage() {
   const [tagLabel, setTagLabel] = useState('');
   const [commentBody, setCommentBody] = useState('');
   const setBoardSnapshot = useBoardStore((state) => state.setBoardSnapshot);
+  const boardVersion = useBoardStore((state) => state.boardVersion);
   const selectedObjectIds = useBoardStore((state) => state.selectedObjectIds);
 
   // ── TanStack Query hooks ──
@@ -74,6 +75,13 @@ export function RoomPage() {
       commentsQuery.refetch();
     }, [commentsQuery.refetch])
   });
+
+  // Auto-refresh version history when board changes
+  useEffect(() => {
+    if (boardVersion > 0 && showVersions) {
+      versionHistoryQuery.refetch();
+    }
+  }, [boardVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload versions/comments when snapshot is restored
   useEffect(() => {
@@ -313,7 +321,7 @@ export function RoomPage() {
                       <span className="text-body-sm text-on-surface">{formatVersionEventType(evt.eventType)}</span>
                     </div>
                     <div className="flex items-center gap-2 text-label-code text-on-surface-variant">
-                      <span>by {getVersionActorLabel(evt)}</span>
+                      <span>by {getVersionActorLabel(evt, user)}</span>
                       <time dateTime={evt.createdAt}>{new Date(evt.createdAt).toLocaleTimeString()}</time>
                     </div>
                     <div className="flex items-center gap-2 mt-1.5">
@@ -345,7 +353,17 @@ export function RoomPage() {
         )}
 
         {/* Object Detail Panel */}
-        {activeRoom && <ObjectDetailPanel onDelete={realtime.sendObjectDelete} role={activeRoom.role} />}
+        {activeRoom && (
+          <ObjectDetailPanel
+            onDelete={realtime.sendObjectDelete}
+            onUpdate={(objectId, patch) => {
+              const obj = useBoardStore.getState().objects[objectId];
+              if (!obj || obj.deleted) return;
+              realtime.sendObjectUpdate({ objectId, expectedVersion: obj.version, patch });
+            }}
+            role={activeRoom.role}
+          />
+        )}
       </div>
     </div>
   );
