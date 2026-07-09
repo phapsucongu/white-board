@@ -4,8 +4,13 @@ import { AppModule } from './app.module';
 
 const defaultCorsOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
-function getCorsOrigins(): string[] {
+function getCorsOrigins(): string[] | boolean {
   const configuredOrigin = process.env.CORS_ORIGIN;
+
+  // Allow all origins in production (Railway) when CORS_ORIGIN=*
+  if (configuredOrigin === '*') {
+    return true;
+  }
 
   if (!configuredOrigin) {
     return defaultCorsOrigins;
@@ -30,7 +35,7 @@ async function bootstrap() {
     })
   );
 
-  const port = Number(process.env.BACKEND_PORT ?? 3000);
+  const port = Number(process.env.PORT ?? process.env.BACKEND_PORT ?? 3000);
 
   await app.listen(port);
 }
