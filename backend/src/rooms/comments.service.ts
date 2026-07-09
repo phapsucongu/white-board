@@ -14,6 +14,8 @@ export type CommentResponse = {
   body: string;
   resolved: boolean;
   authorId: string;
+  authorDisplayName: string | null;
+  authorEmail: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -25,7 +27,8 @@ export class CommentsService {
   async list(roomId: string): Promise<CommentResponse[]> {
     const comments = await this.prisma.comment.findMany({
       where: { roomId },
-      orderBy: { createdAt: 'asc' }
+      orderBy: { createdAt: 'asc' },
+      include: { author: { select: { displayName: true, email: true } } }
     });
 
     return comments.map((comment) => this.toResponse(comment));
@@ -40,7 +43,8 @@ export class CommentsService {
         x: dto.x,
         y: dto.y,
         body: dto.body.trim()
-      }
+      },
+      include: { author: { select: { displayName: true, email: true } } }
     });
 
     return this.toResponse(comment);
@@ -61,7 +65,8 @@ export class CommentsService {
       data: {
         body: dto.body === undefined ? undefined : dto.body.trim(),
         resolved: dto.resolved
-      }
+      },
+      include: { author: { select: { displayName: true, email: true } } }
     });
 
     return this.toResponse(comment);
@@ -101,7 +106,7 @@ export class CommentsService {
     throw new ForbiddenException('Only the author or room owner can modify this comment');
   }
 
-  private toResponse(comment: Comment): CommentResponse {
+  private toResponse(comment: Comment & { author?: { displayName: string | null; email: string } }): CommentResponse {
     return {
       id: comment.id,
       roomId: comment.roomId,
@@ -111,6 +116,8 @@ export class CommentsService {
       body: comment.body,
       resolved: comment.resolved,
       authorId: comment.authorId,
+      authorDisplayName: comment.author?.displayName ?? null,
+      authorEmail: comment.author?.email ?? '',
       createdAt: comment.createdAt.toISOString(),
       updatedAt: comment.updatedAt.toISOString()
     };

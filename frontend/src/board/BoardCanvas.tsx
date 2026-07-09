@@ -523,17 +523,17 @@ export const BoardCanvas = memo(function BoardCanvas({
       {/* Text Input Overlay */}
       {textInput.visible && (
         <div
-          className="absolute z-50 bg-surface-container border border-primary rounded shadow-lg p-2"
-          style={{ left: textInput.position.x * viewport.scale + viewport.x + 8, top: textInput.position.y * viewport.scale + viewport.y + 8 }}
+          className="absolute z-50"
+          style={{ left: textInput.position.x * viewport.scale + viewport.x, top: textInput.position.y * viewport.scale + viewport.y }}
         >
           <input
             autoFocus
-            className="bg-surface-container-highest border border-stroke-default rounded px-3 py-1.5 text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 transition-all min-w-[200px]"
-            placeholder="Enter text..."
+            className="bg-transparent border-0 border-b-2 border-primary outline-none px-1 py-0 text-body-md text-[#1e293b] placeholder:text-outline min-w-[120px]"
+            placeholder="Type something..."
             value={textValue}
             onChange={(e) => setTextValue(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleTextSubmit(); if (e.key === 'Escape') { setTextInput({ position: { x: 0, y: 0 }, visible: false }); setTextValue(''); } }}
-            onBlur={handleTextSubmit}
+            style={{ fontSize: 20, fontFamily: 'Inter, sans-serif', fontWeight: 600 }}
           />
         </div>
       )}
@@ -770,7 +770,7 @@ function BoardObjectShape({
     <>
       <Text {...commonProps} ref={onRegisterNode}
         text={getStr(object, 'text', 'Text')} width={getNum(object, 'width', 220)}
-        fill={getStr(object, 'fill', '#dae2fd')} fontSize={getNum(object, 'fontSize', 20)} fontStyle="600"
+        fill={getStr(object, 'fill', '#1e293b')} fontSize={getNum(object, 'fontSize', 20)} fontStyle="600"
         onTransformStart={() => onTransformStart(object.id)}
         onTransformEnd={(e) => onTransformEnd(object.id, e)} />
       {lease && (

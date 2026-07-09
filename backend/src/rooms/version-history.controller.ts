@@ -28,7 +28,7 @@ export class VersionHistoryController {
   }
 
   @Post(':version/restore')
-  @RequiredRoomRole(RoomRole.OWNER)
+  @RequiredRoomRole(RoomRole.EDITOR)
   restoreVersion(
     @Param('roomId') roomId: string,
     @Param('version', ParseIntPipe) version: number,

@@ -231,7 +231,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         selectedObjectIds: new Set([...state.selectedObjectIds].filter((id) => id !== objectId))
       };
     }),
-  selectObject: (objectId) => set({ selectedObjectIds: new Set([objectId]), tool: 'select' }),
+  selectObject: (objectId) => set({ selectedObjectIds: new Set([objectId]) }),
   toggleObjectSelection: (objectId) =>
     set((state) => {
       const next = new Set(state.selectedObjectIds);
@@ -507,7 +507,7 @@ export function createLocalTextObject({
     createdAt: now,
     updatedAt: now,
     props: {
-      fill: '#dae2fd',
+      fill: '#1e293b',
       fontSize: 20,
       text,
       width: 220

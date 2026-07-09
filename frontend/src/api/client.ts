@@ -106,6 +106,8 @@ export type CommentSummary = {
   body: string;
   resolved: boolean;
   authorId: string;
+  authorDisplayName: string | null;
+  authorEmail: string;
   createdAt: string;
   updatedAt: string;
 };
