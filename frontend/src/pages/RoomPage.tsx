@@ -326,7 +326,8 @@ export function RoomPage() {
                             if (!accessToken) return;
                             restoreMutation.mutate({ version: evt.version, accessToken }, {
                               onSuccess: (result) => {
-                                toastService.success(`Restored to v${result.restoredFromVersion}`);
+                                toastService.success(`Restored to v${result.restoredFromVersion}. Undo/redo history cleared.`);
+                                realtime.clearHistory();
                                 versionHistoryQuery.refetch();
                                 boardQuery.refetch();
                               },
